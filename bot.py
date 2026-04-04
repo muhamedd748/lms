@@ -12,7 +12,7 @@ from telegram.ext import (
 import httpx
 
 # ================== CONFIG ==================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.getenv("8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU")
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN is not set in environment variables!")
 

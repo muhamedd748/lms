@@ -1,4 +1,3 @@
-
 import os
 import asyncio
 import time
@@ -15,10 +14,11 @@ import httpx
 # ================== CONFIG ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    BOT_TOKEN = "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"  # Remove this line after Railway variable works reliably
+    BOT_TOKEN = "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"
     print("⚠️ Using fallback hardcoded token")
 
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
+CHANNEL_ID = "@lmsmersa"  # <-- Channel to send automatic messages
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -80,6 +80,14 @@ def create_assignment_buttons(assignments):
     keyboard.append([InlineKeyboardButton("🔄 Refresh Data", callback_data="refresh")])
     return InlineKeyboardMarkup(keyboard), active_count
 
+# ================== CHANNEL POST HELPER ==================
+async def send_to_channel(bot, message: str):
+    """Send message to the channel"""
+    try:
+        await bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode="Markdown")
+        logger.info("✅ Sent message to channel")
+    except Exception as e:
+        logger.error(f"❌ Failed to send message to channel: {e}")
 
 # ================== FETCH DATA ==================
 async def fetch_data():
@@ -94,10 +102,8 @@ async def fetch_data():
         logger.error(f"❌ Error fetching data: {e}")
         return None
 
-
 # ================== MAIN MENU HELPER ==================
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = True):
-    """Always show the main assignment list"""
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if data:
         context.bot_data["assignment_data"] = data
@@ -122,20 +128,16 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
             text, parse_mode="Markdown", reply_markup=keyboard
         )
 
-
 # ================== BOT HANDLERS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update, context, edit=False)
 
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
     action = query.data
     assignments = None
 
-    # Get fresh or cached data
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if data and "assignments" in data:
         context.bot_data["assignment_data"] = data
@@ -165,7 +167,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             time_str = format_time_ago(ass.get("minutes_past", 0))
             rate = round(ass["statistics"].get("submission_rate", 0), 1)
             text += f"**{ass['title']}**\n⏰ {time_str}\n📈 Rate: {rate}%\n\n"
-        
         kb = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
         return
@@ -176,11 +177,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not selected:
             await query.edit_message_text("Assignment not found.")
             return
-
         context.bot_data["selected_assignment"] = selected
         time_str = format_time_ago(selected.get("minutes_past", 0))
         text = f"✅ **{selected['title']}**\n⏰ {time_str}\n\nWhat do you want to see?"
-
         keyboard = [
             [InlineKeyboardButton("📊 Summary", callback_data="summary_this")],
             [InlineKeyboardButton("❌ Missing & Late", callback_data="missing_this")],
@@ -197,12 +196,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     time_str = format_time_ago(ass.get("minutes_past", 0))
+    text = ""
 
     if action == "summary_this":
         stats = ass["statistics"]
         rate = round(stats.get("submission_rate", 0), 1)
         total = stats.get("submitted_count", 0) + stats.get("not_submitted_count", 0)
         text = f"📊 **Summary**\n**{ass['title']}**\n⏰ {time_str}\n\n✅ Submitted: {stats.get('submitted_count',0)}/{total}\n📈 Rate: {rate}%"
+        # ---------------- SEND TO CHANNEL ----------------
+        await send_to_channel(context.bot, text)
 
     elif action == "missing_this":
         text = f"❌ **Missing & Late Submissions**\n**{ass['title']}**\n\n"
@@ -220,56 +222,39 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += f"• {s['trainee_name']}\n"
         if not late_list and not not_sub_list:
             text += "🎉 Great job! Everyone submitted on time."
+
     else:  # remaining_this
         text = f"⏳ **Remaining Time**\n**{ass['title']}**\n\nDeadline passed **{time_str}** ago."
 
     kb = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
     await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
-
 # ================== SETUP PERSISTENT MENU ==================
 async def post_init(application):
-    """Run once when bot starts - sets persistent menu button"""
-    commands = [
-        BotCommand(command="start", description="📚 Show Active Assignments"),
-    ]
+    commands = [BotCommand(command="start", description="📚 Show Active Assignments")]
     await application.bot.set_my_commands(commands)
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     logger.info("✅ Persistent menu button set (/start is always available)")
 
-
 # ================== MAIN ==================
 def main():
     logger.info("🚀 Starting Assignment Tracking Bot...")
-
     application = ApplicationBuilder().token(BOT_TOKEN).build()
-
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Global error handler
     async def error_handler(update, context):
         logger.error(f"Telegram Error: {context.error}")
-
     application.add_error_handler(error_handler)
 
-    # Set persistent menu after startup
     application.post_init = post_init
-
-    application.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=None
-    )
-
+    application.run_polling(drop_pending_updates=True, allowed_updates=None)
 
 if __name__ == "__main__":
-    # Keep-alive for Railway
     def keep_alive():
         while True:
             logger.info(f"[{time.strftime('%H:%M:%S')}] Bot keep-alive ping...")
             time.sleep(240)
-
     import threading
     threading.Thread(target=keep_alive, daemon=True).start()
-
     main()

@@ -13,12 +13,12 @@ import httpx
 
 # ================== CONFIG ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHANNEL_ID = "@lmsmersa"  # Your channel username here
 if not BOT_TOKEN:
     BOT_TOKEN = "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"
     print("⚠️ Using fallback hardcoded token")
 
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
-CHANNEL_ID = "@lmsmersa"  # <-- Channel to send automatic messages
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -45,7 +45,6 @@ def format_time_ago(minutes_past: int) -> str:
     weeks = days // 7
     return f"{weeks} week{'s' if weeks != 1 else ''} ago"
 
-
 def minutes_to_human_late(minutes: int) -> str:
     if minutes <= 0:
         return "On time"
@@ -61,7 +60,6 @@ def minutes_to_human_late(minutes: int) -> str:
         return f"{days} day{'s' if days != 1 else ''} late"
     return f"{days} day{'s' if days != 1 else ''} {hours_left} hour{'s' if hours_left != 1 else ''} late"
 
-
 def create_assignment_buttons(assignments):
     keyboard = []
     active_count = 0
@@ -72,22 +70,11 @@ def create_assignment_buttons(assignments):
             active_count += 1
             short_title = ass["title"][:38] + "..." if len(ass["title"]) > 38 else ass["title"]
             keyboard.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"ass_{ass['assignment_id']}")])
-
     if not keyboard:
         keyboard.append([InlineKeyboardButton("No recent assignments (≤5 days)", callback_data="none")])
-
     keyboard.append([InlineKeyboardButton("📋 View All Assignments", callback_data="all_assignments")])
     keyboard.append([InlineKeyboardButton("🔄 Refresh Data", callback_data="refresh")])
     return InlineKeyboardMarkup(keyboard), active_count
-
-# ================== CHANNEL POST HELPER ==================
-async def send_to_channel(bot, message: str):
-    """Send message to the channel"""
-    try:
-        await bot.send_message(chat_id=CHANNEL_ID, text=message, parse_mode="Markdown")
-        logger.info("✅ Sent message to channel")
-    except Exception as e:
-        logger.error(f"❌ Failed to send message to channel: {e}")
 
 # ================== FETCH DATA ==================
 async def fetch_data():
@@ -107,7 +94,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if data:
         context.bot_data["assignment_data"] = data
-
     if not data or "assignments" not in data:
         text = "❌ Could not fetch data from server."
         if edit and update.callback_query:
@@ -115,10 +101,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         else:
             await update.message.reply_text(text)
         return
-
     keyboard, active = create_assignment_buttons(data["assignments"])
     text = f"📚 **Active Assignments** ({active})\nDeadline passed 5 days or less\n\nPlease select an assignment:"
-
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(
             text, parse_mode="Markdown", reply_markup=keyboard
@@ -137,12 +121,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     action = query.data
     assignments = None
-
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if data and "assignments" in data:
         context.bot_data["assignment_data"] = data
         assignments = data["assignments"]
-
     if not assignments:
         await query.edit_message_text("❌ No data available. Use /start")
         return
@@ -194,17 +176,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")
         return
-
     time_str = format_time_ago(ass.get("minutes_past", 0))
-    text = ""
 
     if action == "summary_this":
         stats = ass["statistics"]
         rate = round(stats.get("submission_rate", 0), 1)
         total = stats.get("submitted_count", 0) + stats.get("not_submitted_count", 0)
         text = f"📊 **Summary**\n**{ass['title']}**\n⏰ {time_str}\n\n✅ Submitted: {stats.get('submitted_count',0)}/{total}\n📈 Rate: {rate}%"
-        # ---------------- SEND TO CHANNEL ----------------
-        await send_to_channel(context.bot, text)
+
+        # --- Send to your channel ---
+        try:
+            await context.bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode="Markdown")
+            logger.info("✅ Summary sent to channel successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to send summary to channel: {e}")
 
     elif action == "missing_this":
         text = f"❌ **Missing & Late Submissions**\n**{ass['title']}**\n\n"
@@ -222,7 +207,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += f"• {s['trainee_name']}\n"
         if not late_list and not not_sub_list:
             text += "🎉 Great job! Everyone submitted on time."
-
     else:  # remaining_this
         text = f"⏳ **Remaining Time**\n**{ass['title']}**\n\nDeadline passed **{time_str}** ago."
 
@@ -231,7 +215,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================== SETUP PERSISTENT MENU ==================
 async def post_init(application):
-    commands = [BotCommand(command="start", description="📚 Show Active Assignments")]
+    commands = [
+        BotCommand(command="start", description="📚 Show Active Assignments"),
+    ]
     await application.bot.set_my_commands(commands)
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     logger.info("✅ Persistent menu button set (/start is always available)")
@@ -245,8 +231,8 @@ def main():
 
     async def error_handler(update, context):
         logger.error(f"Telegram Error: {context.error}")
-    application.add_error_handler(error_handler)
 
+    application.add_error_handler(error_handler)
     application.post_init = post_init
     application.run_polling(drop_pending_updates=True, allowed_updates=None)
 

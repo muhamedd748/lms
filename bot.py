@@ -4,11 +4,12 @@ import threading
 import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.error import Conflict, TelegramError
 
 # ================== CONFIG ==================
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # ← Read from environment variable (recommended)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    BOT_TOKEN = "8679659340:AAFDka-7x6doy5e_9areii48bKXOy5Egh-s"  # fallback
+    BOT_TOKEN = "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"  # ← Your new token
 
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
 HEADERS = {
@@ -67,8 +68,10 @@ def create_assignment_buttons(assignments):
             active_count += 1
             short_title = ass["title"][:38] + "..." if len(ass["title"]) > 38 else ass["title"]
             keyboard.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"ass_{ass['assignment_id']}")])
+
     if not keyboard:
         keyboard.append([InlineKeyboardButton("No recent assignments (≤5 days)", callback_data="none")])
+
     keyboard.append([InlineKeyboardButton("📋 View All Assignments", callback_data="all_assignments")])
     keyboard.append([InlineKeyboardButton("🔄 Refresh Data", callback_data="refresh")])
     return InlineKeyboardMarkup(keyboard), active_count
@@ -80,6 +83,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not data or "assignments" not in data:
         await update.message.reply_text("❌ Could not fetch data from server.")
         return
+
     context.bot_data["assignment_data"] = data
     keyboard, active = create_assignment_buttons(data["assignments"])
     text = f"📚 **Active Assignments** ({active})\nDeadline passed 5 days or less\n\nPlease select an assignment:"
@@ -109,6 +113,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.bot_data["assignment_data"] = data
             keyboard, _ = create_assignment_buttons(data["assignments"])
             await query.edit_message_text("✅ Data refreshed successfully!", reply_markup=keyboard)
+        else:
+            await query.edit_message_text("❌ Failed to refresh data.")
         return
 
     if action == "all_assignments":
@@ -132,6 +138,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not selected:
             await query.edit_message_text("Assignment not found.")
             return
+
         context.bot_data["selected_assignment"] = selected
         time_str = format_time_ago(selected.get("minutes_past", 0))
         text = f"✅ **{selected['title']}**\n⏰ {time_str}\n\nWhat do you want to see?"
@@ -186,19 +193,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
+    print("🚀 Starting Assignment Tracking Bot...")
+
     application = Application.builder().token(BOT_TOKEN).build()
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
+
+    # Graceful error handling for common polling conflicts
+    async def error_handler(update, context):
+        error = context.error
+        if isinstance(error, Conflict):
+            print("⚠️ Conflict: Another instance is already polling. Stopping this one.")
+        elif isinstance(error, TelegramError):
+            print(f"Telegram Error: {error}")
+        else:
+            print(f"Error: {error}")
+
+    application.add_error_handler(error_handler)
+
     print("🚀 Assignment Tracking Bot is running...")
     print("Type /start in Telegram")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+    application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
-    # Keep-alive for free hosting
+    # Keep-alive thread for free hosting platforms (Render, Railway, etc.)
     def keep_alive():
         while True:
             print(f"[{time.strftime('%H:%M:%S')}] Bot keep-alive ping...")
-            time.sleep(240)
+            time.sleep(240)  # 4 minutes
+
     threading.Thread(target=keep_alive, daemon=True).start()
     main()

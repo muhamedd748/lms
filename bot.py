@@ -12,9 +12,19 @@ from telegram.ext import (
 import httpx
 
 # ================== CONFIG ==================
-BOT_TOKEN = os.getenv("8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU")
+# TEMPORARY: Hardcoded token for testing (remove after Railway works)
+BOT_TOKEN = "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"
+
+# Use environment variable if available (preferred)
+if os.getenv("BOT_TOKEN"):
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+    print("✅ Using BOT_TOKEN from Railway environment variable")
+else:
+    print("⚠️ Using hardcoded BOT_TOKEN (temporary)")
+
+# If still empty, raise error
 if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN is not set in environment variables!")
+    raise ValueError("❌ BOT_TOKEN is not set!")
 
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
 
@@ -25,7 +35,8 @@ HEADERS = {
 
 # ================== LOGGING ==================
 logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
@@ -117,7 +128,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     assignments = data["assignments"]
     action = query.data
 
-    # ---------------- ACTIONS ----------------
     if action == "refresh":
         data = await fetch_data()
         if data:
@@ -204,27 +214,27 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    # Graceful shutdown & error logging
+    # Error handler
     async def error_handler(update, context):
-        error = context.error
-        logger.error(f"Telegram Error: {error}")
+        logger.error(f"Telegram Error: {context.error}")
 
     application.add_error_handler(error_handler)
 
-    # Run polling safely
+    # Run with polling
     application.run_polling(
         drop_pending_updates=True,
-        allowed_updates=None  # all updates
+        allowed_updates=None
     )
 
 
 if __name__ == "__main__":
-    # Optional keep-alive for free hosts
+    # Keep-alive thread for Railway free tier
     def keep_alive():
         while True:
-            logger.info(f"[{time.strftime('%H:%M:%S')}] Keep-alive ping...")
+            logger.info(f"[{time.strftime('%H:%M:%S')}] Bot keep-alive ping...")
             time.sleep(240)  # 4 minutes
 
     import threading
     threading.Thread(target=keep_alive, daemon=True).start()
+
     main()

@@ -18,7 +18,7 @@ import httpx
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     BOT_TOKEN = "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"  
-    print("⚠️ Using fallback hardcoded token - Set BOT_TOKEN as environment variable on Railway!")
+    print("⚠️ Using fallback hardcoded token - Recommended to set BOT_TOKEN env variable on Railway!")
 
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
 
@@ -71,7 +71,7 @@ def create_assignment_buttons(assignments):
     for ass in assignments:
         mins = ass.get("minutes_past", 0)
         days = mins // 1440
-        if days <= 5:   # Show only recent assignments (deadline passed ≤5 days ago)
+        if days <= 5:
             active_count += 1
             short_title = ass["title"][:38] + "..." if len(ass["title"]) > 38 else ass["title"]
             keyboard.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"ass_{ass['assignment_id']}")])
@@ -85,7 +85,7 @@ def create_assignment_buttons(assignments):
     return InlineKeyboardMarkup(keyboard), active_count
 
 
-# ================== FETCH DATA (Improved) ==================
+# ================== FETCH DATA (Fixed for Status 202) ==================
 async def fetch_data():
     try:
         logger.info("🔄 Attempting to fetch data from LMS API...")
@@ -95,20 +95,22 @@ async def fetch_data():
             
             logger.info(f"📡 API Status Code: {response.status_code}")
             
-            if response.status_code != 200:
-                logger.error(f"❌ API returned bad status: {response.status_code}")
+            # Accept both 200 and 202 (your API returns 202 but still sends the JSON)
+            if response.status_code not in (200, 202):
+                logger.error(f"❌ API returned unexpected status: {response.status_code}")
+                logger.error(f"Response: {response.text[:400]}")
                 return None
             
             data = response.json()
             count = len(data.get("assignments", []))
-            logger.info(f"✅ SUCCESS! Fetched {count} assignments from the API.")
+            logger.info(f"✅ SUCCESS! Fetched {count} assignments (Status: {response.status_code})")
             return data
 
     except httpx.TimeoutException:
         logger.error("❌ Timeout: API took too long to respond")
         return None
     except httpx.RequestError as e:
-        logger.error(f"❌ Network error while connecting to API: {e}")
+        logger.error(f"❌ Network error connecting to API: {e}")
         return None
     except Exception as e:
         logger.error(f"❌ Unexpected error in fetch_data: {type(e).__name__} - {e}")
@@ -117,14 +119,13 @@ async def fetch_data():
 
 # ================== MAIN MENU ==================
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = True):
-    """Show main assignment list"""
     data = context.bot_data.get("assignment_data") or await fetch_data()
 
     if data and "assignments" in data:
         context.bot_data["assignment_data"] = data
 
     if not data or "assignments" not in data:
-        text = "❌ Could not fetch data from server.\n\nPlease click **Refresh Data** or try again in a moment."
+        text = "❌ Could not fetch assignment data right now.\n\nPlease click **🔄 Refresh Data** or try again."
         if edit and update.callback_query:
             await update.callback_query.edit_message_text(text, parse_mode="Markdown")
         else:
@@ -152,7 +153,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     action = query.data
 
-    # Get fresh or cached data
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if data and "assignments" in data:
         context.bot_data["assignment_data"] = data
@@ -185,7 +185,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # Individual assignment
     if action.startswith("ass_"):
         try:
             ass_id = int(action[4:])
@@ -288,7 +287,7 @@ async def main_async():
             drop_pending_updates=True,
             allowed_updates=None
         )
-        await asyncio.Event().wait()  # Keep running
+        await asyncio.Event().wait()
     finally:
         logger.info("🛑 Shutting down bot...")
         await application.stop()
@@ -305,7 +304,6 @@ def start_bot():
 
 
 if __name__ == "__main__":
-    # Optional keep-alive for Railway
     def keep_alive():
         while True:
             logger.info(f"[{time.strftime('%H:%M:%S')}] Keep-alive ping...")
@@ -313,7 +311,6 @@ if __name__ == "__main__":
 
     threading.Thread(target=keep_alive, daemon=True).start()
 
-    # Also define the start function used by CommandHandler
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(update, context, edit=False)
 

@@ -3,6 +3,7 @@ import asyncio
 import time
 import logging
 import threading
+import random
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
     ApplicationBuilder,
@@ -20,21 +21,22 @@ if not BOT_TOKEN:
 CHANNEL_USERNAME = "@lmsmersa"
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
 
-# Much stronger headers to mimic real browser better
+# Very strong browser-like headers + anti-detection
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
+    "Accept-Encoding": "gzip, deflate, br, zstd",
     "Referer": "https://lms.mersamedia.org/",
     "Origin": "https://lms.mersamedia.org",
-    "Cache-Control": "no-cache",
+    "Cache-Control": "no-cache, no-store",
     "Pragma": "no-cache",
     "Sec-Fetch-Site": "same-origin",
     "Sec-Fetch-Mode": "cors",
     "Sec-Fetch-Dest": "empty",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
+    "DNT": "1",
 }
 
 # ================== LOGGING ==================
@@ -102,43 +104,54 @@ def create_assignment_buttons(assignments):
     return InlineKeyboardMarkup(keyboard), active_count
 
 
-# ================== IMPROVED FETCH DATA ==================
+# ================== IMPROVED FETCH DATA (Anti-Block) ==================
 async def fetch_data():
     try:
-        logger.info("🔄 Fetching data from LMS API...")
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            for attempt in range(6):
-                logger.info(f"📡 Attempt {attempt+1}/6")
+        logger.info("🔄 Starting fetch from LMS API...")
+        await asyncio.sleep(random.uniform(1.2, 2.8))   # random human-like delay
+
+        async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
+            for attempt in range(8):
+                logger.info(f"📡 Attempt {attempt+1}/8")
+
                 response = await client.get(API_URL, headers=HEADERS)
-                
-                logger.info(f"   Status: {response.status_code} | Content-Type: {response.headers.get('content-type')}")
+
+                logger.info(f"   Status: {response.status_code} | Content-Type: {response.headers.get('content-type', 'N/A')}")
 
                 raw_text = response.text.strip()
+
                 if not raw_text:
-                    logger.warning("   Empty response")
+                    logger.warning("   ❌ Empty response body")
                     await asyncio.sleep(2)
                     continue
 
-                if raw_text.startswith('<html') or '<!DOCTYPE' in raw_text[:200].lower():
-                    logger.error("🚫 Received HTML instead of JSON (protection triggered)")
-                    logger.error(f"   Preview: {raw_text[:350]}...")
-                    await asyncio.sleep(3)
+                # Detect protection / HTML
+                lower_text = raw_text.lower()
+                if any(x in lower_text for x in ['<html', '<!doctype', 'cloudflare', 'challenge', 'captcha', 'attention required', 'just a moment']):
+                    logger.error("🚫 BLOCKED - Received HTML / Protection page instead of JSON")
+                    logger.error(f"   Preview (first 400 chars): {raw_text[:400]}...")
+                    await asyncio.sleep(random.uniform(3.5, 6.0))
                     continue
 
                 try:
                     data = response.json()
                     count = len(data.get("assignments", []))
-                    logger.info(f"✅ SUCCESS! Loaded {count} assignments")
+                    logger.info(f"✅ SUCCESS! Loaded {count} assignments from API")
                     return data
                 except Exception as je:
                     logger.error(f"   JSON parse failed: {je}")
-                    await asyncio.sleep(1.5)
+                    logger.error(f"   Response preview: {raw_text[:500]}...")
+                    await asyncio.sleep(2)
                     continue
 
-            logger.error("❌ All attempts failed")
+            logger.error("❌ All 8 attempts failed. Server is blocking the bot.")
             return None
+
+    except httpx.TimeoutException:
+        logger.error("❌ Request timed out")
+        return None
     except Exception as e:
-        logger.error(f"❌ Fetch error: {e}")
+        logger.error(f"❌ Unexpected fetch error: {e}")
         return None
 
 
@@ -151,7 +164,7 @@ async def send_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
-        logger.info("✅ Sent to @lmsmersa")
+        logger.info("✅ Message sent to channel @lmsmersa")
     except Exception as e:
         logger.error(f"Channel send failed: {e}")
 
@@ -163,7 +176,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         context.bot_data["assignment_data"] = data
 
     if not data or "assignments" not in data:
-        text = "❌ Could not load assignments right now.\n\nPlease click **🔄 Refresh Data**"
+        text = "❌ Could not load assignments right now.\n\nPlease click **🔄 Refresh Data** again."
         if edit and update.callback_query:
             await update.callback_query.edit_message_text(text, parse_mode="Markdown")
         else:
@@ -191,7 +204,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if not data or "assignments" not in data:
-        await query.edit_message_text("❌ No data available. Try Refresh again.")
+        await query.edit_message_text("❌ No data available. Try **🔄 Refresh Data** again.")
         return
 
     assignments = data["assignments"]
@@ -228,6 +241,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Invalid selection.")
             return
 
+    # Detail views
     ass = context.bot_data.get("selected_assignment")
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")

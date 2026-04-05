@@ -1,8 +1,9 @@
-
 import os
 import asyncio
 import time
 import logging
+import threading
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,24 +11,24 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
 )
+
 import httpx
 
 # ================== CONFIG ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    BOT_TOKEN = "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"  # Remove this line after Railway variable works reliably
-    print("⚠️ Using fallback hardcoded token")
+    BOT_TOKEN = "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"  # Remove this after setting env var properly
+    print("⚠️ Using fallback hardcoded token - Set BOT_TOKEN environment variable!")
 
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
-
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
+    "User-Agent": "Mozilla/5.0 (compatible; AssignmentBot/1.0)",
     "Accept": "application/json"
 }
 
 # ================== LOGGING ==================
 logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s", 
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
@@ -65,10 +66,11 @@ def minutes_to_human_late(minutes: int) -> str:
 def create_assignment_buttons(assignments):
     keyboard = []
     active_count = 0
+
     for ass in assignments:
         mins = ass.get("minutes_past", 0)
         days = mins // 1440
-        if days <= 5:
+        if days <= 5:  # Only show assignments whose deadline passed ≤5 days ago
             active_count += 1
             short_title = ass["title"][:38] + "..." if len(ass["title"]) > 38 else ass["title"]
             keyboard.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"ass_{ass['assignment_id']}")])
@@ -78,32 +80,35 @@ def create_assignment_buttons(assignments):
 
     keyboard.append([InlineKeyboardButton("📋 View All Assignments", callback_data="all_assignments")])
     keyboard.append([InlineKeyboardButton("🔄 Refresh Data", callback_data="refresh")])
+
     return InlineKeyboardMarkup(keyboard), active_count
 
 
 # ================== FETCH DATA ==================
 async def fetch_data():
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=20.0) as client:
             response = await client.get(API_URL, headers=HEADERS)
-            if response.status_code != 200:
-                logger.warning(f"❌ API returned status {response.status_code}")
-                return None
+            response.raise_for_status()  # Better error handling
             return response.json()
+    except httpx.HTTPStatusError as e:
+        logger.error(f"❌ API returned status {e.response.status_code}")
+        return None
     except Exception as e:
         logger.error(f"❌ Error fetching data: {e}")
         return None
 
 
-# ================== MAIN MENU HELPER ==================
+# ================== MAIN MENU ==================
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = True):
-    """Always show the main assignment list"""
+    """Show the main list of active assignments"""
     data = context.bot_data.get("assignment_data") or await fetch_data()
-    if data:
+
+    if data and "assignments" in data:
         context.bot_data["assignment_data"] = data
 
     if not data or "assignments" not in data:
-        text = "❌ Could not fetch data from server."
+        text = "❌ Could not fetch data from server. Please try again later."
         if edit and update.callback_query:
             await update.callback_query.edit_message_text(text)
         else:
@@ -111,7 +116,8 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         return
 
     keyboard, active = create_assignment_buttons(data["assignments"])
-    text = f"📚 **Active Assignments** ({active})\nDeadline passed 5 days or less\n\nPlease select an assignment:"
+
+    text = f"📚 **Active Assignments** ({active})\n_Deadline passed 5 days or less_\n\nPlease select an assignment:"
 
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(
@@ -123,7 +129,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         )
 
 
-# ================== BOT HANDLERS ==================
+# ================== HANDLERS ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update, context, edit=False)
 
@@ -133,52 +139,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     action = query.data
-    assignments = None
-
-    # Get fresh or cached data
     data = context.bot_data.get("assignment_data") or await fetch_data()
+
     if data and "assignments" in data:
         context.bot_data["assignment_data"] = data
         assignments = data["assignments"]
-
-    if not assignments:
+    else:
         await query.edit_message_text("❌ No data available. Use /start")
         return
 
-    # ---------------- ACTIONS ----------------
+    # Refresh action
     if action == "refresh":
         data = await fetch_data()
-        if data:
+        if data and "assignments" in data:
             context.bot_data["assignment_data"] = data
             assignments = data["assignments"]
         else:
             await query.edit_message_text("❌ Failed to refresh data.")
             return
 
-    if action in ["back_to_list", "back_to_selected", "refresh"]:
+    if action in ["back_to_list", "refresh"]:
         await show_main_menu(update, context, edit=True)
         return
 
+    # View all assignments
     if action == "all_assignments":
         text = "📋 **All Assignments**\n\n"
         for ass in assignments:
             time_str = format_time_ago(ass.get("minutes_past", 0))
-            rate = round(ass["statistics"].get("submission_rate", 0), 1)
+            rate = round(ass.get("statistics", {}).get("submission_rate", 0), 1)
             text += f"**{ass['title']}**\n⏰ {time_str}\n📈 Rate: {rate}%\n\n"
-        
+
         kb = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
         return
 
+    # Individual assignment selected
     if action.startswith("ass_"):
-        ass_id = int(action[4:])
-        selected = next((a for a in assignments if a["assignment_id"] == ass_id), None)
+        try:
+            ass_id = int(action[4:])
+        except ValueError:
+            await query.edit_message_text("Invalid assignment ID.")
+            return
+
+        selected = next((a for a in assignments if a.get("assignment_id") == ass_id), None)
         if not selected:
             await query.edit_message_text("Assignment not found.")
             return
 
         context.bot_data["selected_assignment"] = selected
         time_str = format_time_ago(selected.get("minutes_past", 0))
+
         text = f"✅ **{selected['title']}**\n⏰ {time_str}\n\nWhat do you want to see?"
 
         keyboard = [
@@ -187,10 +198,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⏳ Remaining Time", callback_data="remaining_this")],
             [InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")],
         ]
+
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # ---------------- DETAIL VIEWS ----------------
+    # Detail views
     ass = context.bot_data.get("selected_assignment")
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")
@@ -199,27 +211,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     time_str = format_time_ago(ass.get("minutes_past", 0))
 
     if action == "summary_this":
-        stats = ass["statistics"]
+        stats = ass.get("statistics", {})
         rate = round(stats.get("submission_rate", 0), 1)
         total = stats.get("submitted_count", 0) + stats.get("not_submitted_count", 0)
-        text = f"📊 **Summary**\n**{ass['title']}**\n⏰ {time_str}\n\n✅ Submitted: {stats.get('submitted_count',0)}/{total}\n📈 Rate: {rate}%"
+        text = (
+            f"📊 **Summary**\n**{ass['title']}**\n⏰ {time_str}\n\n"
+            f"✅ Submitted: {stats.get('submitted_count', 0)}/{total}\n"
+            f"📈 Rate: {rate}%"
+        )
 
     elif action == "missing_this":
         text = f"❌ **Missing & Late Submissions**\n**{ass['title']}**\n\n"
-        late_list = ass["submissions"].get("late", [])
-        not_sub_list = ass["submissions"].get("not_submitted", [])
+        late_list = ass.get("submissions", {}).get("late", [])
+        not_sub_list = ass.get("submissions", {}).get("not_submitted", [])
+
         if late_list:
             text += "🟠 **Late Submissions:**\n"
             for s in late_list:
                 late_min = s.get("late_by_minutes", 0)
                 text += f"• {s['trainee_name']} — **{minutes_to_human_late(late_min)}**\n"
             text += "\n"
+
         if not_sub_list:
             text += "🔴 **Not Submitted:**\n"
             for s in not_sub_list:
                 text += f"• {s['trainee_name']}\n"
+
         if not late_list and not not_sub_list:
             text += "🎉 Great job! Everyone submitted on time."
+
     else:  # remaining_this
         text = f"⏳ **Remaining Time**\n**{ass['title']}**\n\nDeadline passed **{time_str}** ago."
 
@@ -227,15 +247,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 
-# ================== SETUP PERSISTENT MENU ==================
+# ================== POST INIT ==================
 async def post_init(application):
-    """Run once when bot starts - sets persistent menu button"""
-    commands = [
-        BotCommand(command="start", description="📚 Show Active Assignments"),
-    ]
+    commands = [BotCommand("start", "📚 Show Active Assignments")]
     await application.bot.set_my_commands(commands)
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-    logger.info("✅ Persistent menu button set (/start is always available)")
+    logger.info("✅ Persistent menu button and commands set successfully")
 
 
 # ================== MAIN ==================
@@ -249,11 +266,9 @@ def main():
 
     # Global error handler
     async def error_handler(update, context):
-        logger.error(f"Telegram Error: {context.error}")
+        logger.error(f"Exception while handling an update: {context.error}")
 
     application.add_error_handler(error_handler)
-
-    # Set persistent menu after startup
     application.post_init = post_init
 
     application.run_polling(
@@ -263,13 +278,11 @@ def main():
 
 
 if __name__ == "__main__":
-    # Keep-alive for Railway
+    # Keep-alive thread for platforms like Railway
     def keep_alive():
         while True:
-            logger.info(f"[{time.strftime('%H:%M:%S')}] Bot keep-alive ping...")
-            time.sleep(240)
+            logger.info(f"[{time.strftime('%H:%M:%S')}] Keep-alive ping...")
+            time.sleep(240)  # 4 minutes
 
-    import threading
     threading.Thread(target=keep_alive, daemon=True).start()
-
     main()

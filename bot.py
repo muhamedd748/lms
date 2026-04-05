@@ -4,6 +4,7 @@ import time
 import logging
 import threading
 import random
+import gzip
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
     ApplicationBuilder,
@@ -21,20 +22,13 @@ if not BOT_TOKEN:
 CHANNEL_USERNAME = "@lmsmersa"
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
 
-# Strong headers + explicitly accept compression
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://lms.mersamedia.org/",
-    "Origin": "https://lms.mersamedia.org",
     "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Sec-Fetch-Site": "same-origin",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Dest": "empty",
-    "Connection": "keep-alive",
 }
 
 # ================== LOGGING ==================
@@ -102,64 +96,74 @@ def create_assignment_buttons(assignments):
     return InlineKeyboardMarkup(keyboard), active_count
 
 
-# ================== FIXED FETCH DATA ==================
+# ================== FIXED FETCH WITH MANUAL DECOMPRESSION ==================
 async def fetch_data():
     try:
         logger.info("🔄 Fetching data from LMS API...")
         await asyncio.sleep(random.uniform(1.0, 2.5))
 
-        async with httpx.AsyncClient(timeout=35.0, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=40.0, follow_redirects=True) as client:
             for attempt in range(6):
                 logger.info(f"📡 Attempt {attempt+1}/6")
 
                 response = await client.get(API_URL, headers=HEADERS)
 
-                logger.info(f"   Status: {response.status_code} | Content-Type: {response.headers.get('content-type')}")
+                logger.info(f"   Status: {response.status_code} | Content-Type: {response.headers.get('content-type')} | Encoding: {response.headers.get('content-encoding')}")
 
                 if response.status_code != 200:
-                    logger.warning(f"   Bad status code: {response.status_code}")
                     await asyncio.sleep(2)
                     continue
 
-                # Force decompression and get raw text
+                # === MANUAL DECOMPRESSION FIX ===
+                content = response.content
+                encoding = response.headers.get("content-encoding", "").lower()
+
+                if encoding == "gzip":
+                    try:
+                        content = gzip.decompress(content)
+                        logger.info("   ✅ Gzip decompressed successfully")
+                    except Exception as de:
+                        logger.error(f"   Gzip decompress failed: {de}")
+                elif encoding == "br":
+                    try:
+                        import brotli
+                        content = brotli.decompress(content)
+                        logger.info("   ✅ Brotli decompressed successfully")
+                    except ImportError:
+                        logger.warning("   brotli module not installed")
+                    except Exception as de:
+                        logger.error(f"   Brotli decompress failed: {de}")
+
+                # Convert to text
                 try:
-                    raw_text = response.text  # httpx should handle decompression here
-                except Exception:
-                    raw_text = response.content.decode('utf-8', errors='replace')
+                    text = content.decode("utf-8")
+                except UnicodeDecodeError:
+                    text = content.decode("utf-8", errors="replace")
+                    logger.warning("   Used replace for decoding")
 
-                if not raw_text or len(raw_text) < 10:
-                    logger.warning("   Empty or too small response")
-                    await asyncio.sleep(2)
-                    continue
-
-                # Check if it's actually JSON (not HTML)
-                if raw_text.strip().startswith('<'):
-                    logger.error("🚫 Received HTML instead of JSON")
-                    logger.error(f"   Preview: {raw_text[:300]}...")
+                if len(text) < 20 or text.strip().startswith("<"):
+                    logger.error("   ❌ Received HTML or empty data")
+                    logger.error(f"   Preview: {text[:300]}...")
                     await asyncio.sleep(3)
                     continue
 
+                # Parse JSON
                 try:
-                    data = response.json()   # This should now work if decompression is correct
+                    data = response.json() if not encoding else __import__('json').loads(text)
                     count = len(data.get("assignments", []))
                     logger.info(f"✅ SUCCESS! Loaded {count} assignments")
                     return data
                 except Exception as je:
                     logger.error(f"   JSON parse failed: {je}")
-                    # Fallback: try to decode content manually
-                    try:
-                        data = response.json(content_type=None)  # bypass strict content-type
-                        logger.info(f"✅ SUCCESS with fallback! Loaded {len(data.get('assignments', []))} assignments")
-                        return data
-                    except:
-                        logger.error(f"   Response preview: {raw_text[:400]}...")
+                    logger.error(f"   First 400 chars: {text[:400]}")
                     await asyncio.sleep(2)
                     continue
 
             logger.error("❌ All attempts failed")
             return None
+
     except Exception as e:
-        logger.error(f"❌ Fetch error: {e}")
+        logger.error(f"❌ Unexpected fetch error: {e}")
         return None
 
 
@@ -177,7 +181,7 @@ async def send_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
         logger.error(f"Channel send failed: {e}")
 
 
-# ================== MAIN MENU & BUTTON HANDLER (same as before) ==================
+# ================== MAIN MENU ==================
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = True):
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if data and "assignments" in data:
@@ -200,6 +204,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
+# ================== BUTTON HANDLER ==================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()

@@ -3,6 +3,7 @@ import asyncio
 import time
 import logging
 import threading
+import random
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
@@ -23,7 +24,6 @@ CHANNEL_USERNAME = "@lmsmersa"
 
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
 
-# Better headers to avoid captcha
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
     "Accept": "application/json, text/html, */*",
@@ -101,26 +101,29 @@ def create_assignment_buttons(assignments):
     return InlineKeyboardMarkup(keyboard), active_count
 
 
-# ================== FETCH DATA ==================
+# ================== FETCH DATA - Final Version ==================
 async def fetch_data():
     try:
         logger.info("🔄 Fetching data from LMS API...")
 
-        async with httpx.AsyncClient(timeout=25.0) as client:
-            for attempt in range(4):
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for attempt in range(5):   # 5 attempts
+                if attempt > 0:
+                    delay = random.uniform(1.5, 3.0)
+                    logger.info(f"Waiting {delay:.1f}s before retry...")
+                    await asyncio.sleep(delay)
+
                 response = await client.get(API_URL, headers=HEADERS)
                 logger.info(f"📡 Attempt {attempt+1} → Status: {response.status_code}")
 
                 raw_text = response.text.strip()
                 if not raw_text:
-                    logger.warning("Empty body, retrying...")
-                    await asyncio.sleep(1.5)
+                    logger.warning("Empty body received")
                     continue
 
                 if raw_text.startswith('<html'):
-                    logger.error("🚫 CAPTCHA detected!")
-                    logger.error(f"HTML preview: {raw_text[:400]}")
-                    await asyncio.sleep(2.0)
+                    logger.error("🚫 CAPTCHA / Bot protection triggered!")
+                    logger.error(f"HTML preview: {raw_text[:500]}")
                     continue
 
                 try:
@@ -130,10 +133,9 @@ async def fetch_data():
                     return data
                 except Exception as je:
                     logger.error(f"JSON parse failed: {je}")
-                    await asyncio.sleep(1.0)
                     continue
 
-            logger.error("❌ All attempts failed")
+            logger.error("❌ Failed after 5 attempts. Server is blocking the request.")
             return None
 
     except Exception as e:
@@ -163,7 +165,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         context.bot_data["assignment_data"] = data
 
     if not data or "assignments" not in data:
-        text = "❌ Could not load assignments right now.\n\nPlease click **🔄 Refresh Data**"
+        text = "❌ Could not load assignments right now.\n\nThe server blocked the request (captcha).\nPlease click **🔄 Refresh Data** or try again later."
         if edit and update.callback_query:
             await update.callback_query.edit_message_text(text, parse_mode="Markdown")
         else:
@@ -231,7 +233,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Invalid selection.")
             return
 
-    # Detail views
     ass = context.bot_data.get("selected_assignment")
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")

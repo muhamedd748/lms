@@ -239,7 +239,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minutes_past = ass.get("minutes_past", 0)
     title = ass.get("title", "Unknown Assignment")
 
-    if action == "summary_this":
+        if action == "summary_this":
         stats = ass.get("statistics", {})
         rate = round(stats.get("submission_rate", 0), 1)
         total = stats.get("submitted_count", 0) + stats.get("not_submitted_count", 0)
@@ -258,6 +258,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]
         ]
         context.bot_data["pending_channel_text"] = channel_text
+
+    else:  # remaining_this
+        if minutes_past < 0:
+            time_str = format_remaining_time(abs(minutes_past))
+            text = f"⏳ **Remaining Time**\n**{title}**\n\n**{time_str} remaining** until deadline."
+        else:
+            text = f"⏰ **Deadline Info**\n**{title}**\n\nDeadline passed **{format_time_ago(minutes_past)}**."
+
+        keyboard = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
 
     elif action == "missing_this":
         submissions = ass.get("submissions", {})

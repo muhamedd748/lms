@@ -35,7 +35,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ================== UTILITIES (same as before) ==================
+# ================== UTILITIES ==================
 def format_time_ago(minutes_past: int) -> str:
     if minutes_past < 60:
         return f"{minutes_past} minute{'s' if minutes_past != 1 else ''} ago"
@@ -47,6 +47,18 @@ def format_time_ago(minutes_past: int) -> str:
         return f"{days} day{'s' if days != 1 else ''} ago"
     weeks = days // 7
     return f"{weeks} week{'s' if weeks != 1 else ''} ago"
+
+
+def format_remaining_time(minutes: int) -> str:
+    """Clean remaining time display"""
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    hours = minutes // 60
+    mins = minutes % 60
+    if mins == 0:
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    return f"{hours} hour{'s' if hours != 1 else ''} {mins} minute{'s' if mins != 1 else ''}"
+
 
 def minutes_to_human_late(minutes: int) -> str:
     if minutes <= 0:
@@ -62,6 +74,7 @@ def minutes_to_human_late(minutes: int) -> str:
     if hours_left == 0:
         return f"{days} day{'s' if days != 1 else ''} late"
     return f"{days} day{'s' if days != 1 else ''} {hours_left} hour{'s' if hours_left != 1 else ''} late"
+
 
 def create_assignment_buttons(assignments):
     keyboard = []
@@ -83,13 +96,12 @@ def create_assignment_buttons(assignments):
     return InlineKeyboardMarkup(keyboard), active_count
 
 
-# ================== FETCH DATA - More Reliable ==================
+# ================== FETCH DATA - Reliable ==================
 async def fetch_data():
     try:
         logger.info("🔄 Fetching from LMS API...")
-
         async with httpx.AsyncClient(timeout=15.0) as client:
-            for attempt in range(2):   # Try up to 2 times
+            for attempt in range(3):  # Try 3 times
                 response = await client.get(API_URL, headers=HEADERS)
                 logger.info(f"📡 Attempt {attempt+1} - Status: {response.status_code}")
 
@@ -98,8 +110,8 @@ async def fetch_data():
 
                 raw = response.text.strip()
                 if not raw:
-                    logger.warning("⚠️ Empty body received")
-                    await asyncio.sleep(0.6)
+                    logger.warning("⚠️ Empty body - retrying...")
+                    await asyncio.sleep(0.7)
                     continue
 
                 try:
@@ -111,7 +123,7 @@ async def fetch_data():
                     logger.error(f"JSON error: {je}")
                     continue
 
-            logger.error("❌ Failed after 2 attempts")
+            logger.error("❌ Failed after 3 attempts")
             return None
 
     except Exception as e:
@@ -157,8 +169,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
-# ================== BUTTON HANDLER (with Send to Channel button) ==================
-# ================== BUTTON HANDLER ==================
 # ================== BUTTON HANDLER ==================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -179,7 +189,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "all_assignments":
         text = "📋 **All Assignments**\n\n"
         for ass in assignments:
-            time_str = format_time_ago(abs(ass.get("minutes_past", 0)))   # Fixed possible negative
+            time_str = format_time_ago(abs(ass.get("minutes_past", 0)))
             rate = round(ass.get("statistics", {}).get("submission_rate", 0), 1)
             text += f"**{ass['title']}**\n⏰ {time_str}\n📈 Rate: {rate}%\n\n"
         kb = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
@@ -211,7 +221,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Invalid selection.")
             return
 
-    # === DETAIL VIEWS ===
+    # Detail views
     ass = context.bot_data.get("selected_assignment")
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")
@@ -220,26 +230,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minutes_past = ass.get("minutes_past", 0)
     title = ass.get("title", "Unknown Assignment")
 
-    # ====================== SUMMARY ======================
     if action == "summary_this":
         stats = ass.get("statistics", {})
         rate = round(stats.get("submission_rate", 0), 1)
         total = stats.get("submitted_count", 0) + stats.get("not_submitted_count", 0)
 
         if minutes_past < 0:
-            # Deadline NOT passed yet → Show Remaining Time
             remaining_min = abs(minutes_past)
-            if remaining_min < 60:
-                time_display = f"⏳ **{remaining_min} minute{'s' if remaining_min != 1 else ''} remaining**"
-            else:
-                hours = remaining_min // 60
-                mins = remaining_min % 60
-                if mins == 0:
-                    time_display = f"⏳ **{hours} hour{'s' if hours != 1 else ''} remaining**"
-                else:
-                    time_display = f"⏳ **{hours} hour{'s' if hours != 1 else ''} {mins} minute{'s' if mins != 1 else ''} remaining**"
+            time_display = f"⏳ **{format_remaining_time(remaining_min)} remaining**"
         else:
-            # Deadline passed
             time_display = f"⏰ Deadline passed **{format_time_ago(minutes_past)}** ago"
 
         text = f"📊 **Summary**\n**{title}**\n{time_display}\n\n✅ Submitted: {stats.get('submitted_count', 0)}/{total}\n📈 Rate: {rate}%"
@@ -252,7 +251,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         context.bot_data["pending_channel_text"] = channel_text
 
-    # ====================== MISSING & LATE ======================
     elif action == "missing_this":
         submissions = ass.get("submissions", {})
         late_list = submissions.get("late", [])
@@ -307,7 +305,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("✅ Sent to @lmsmersa successfully!")
         return
 
-# ================== POST INIT & MAIN (same) ==================
+
+# ================== POST INIT & MAIN ==================
 async def post_init(application):
     commands = [BotCommand("start", "📚 Show Active Assignments")]
     await application.bot.set_my_commands(commands)

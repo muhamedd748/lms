@@ -20,12 +20,21 @@ if not BOT_TOKEN:
 CHANNEL_USERNAME = "@lmsmersa"
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
 
+# Much stronger headers to mimic real browser better
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/html, */*",
+    "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://lms.mersamedia.org/",
-    "Cache-Control": "no-cache"
+    "Origin": "https://lms.mersamedia.org",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 # ================== LOGGING ==================
@@ -49,7 +58,6 @@ def format_time_ago(minutes_past: int) -> str:
     weeks = days // 7
     return f"{weeks} week{'s' if weeks != 1 else ''} ago"
 
-
 def format_remaining_time(minutes: int) -> str:
     minutes = abs(minutes)
     if minutes < 60:
@@ -59,7 +67,6 @@ def format_remaining_time(minutes: int) -> str:
     if mins == 0:
         return f"{hours} hour{'s' if hours != 1 else ''}"
     return f"{hours} hour{'s' if hours != 1 else ''} {mins} minute{'s' if mins != 1 else ''}"
-
 
 def minutes_to_human_late(minutes: int) -> str:
     if minutes <= 0:
@@ -75,7 +82,6 @@ def minutes_to_human_late(minutes: int) -> str:
     if hours_left == 0:
         return f"{days} day{'s' if days != 1 else ''} late"
     return f"{days} day{'s' if days != 1 else ''} {hours_left} hour{'s' if hours_left != 1 else ''} late"
-
 
 def create_assignment_buttons(assignments):
     keyboard = []
@@ -96,32 +102,39 @@ def create_assignment_buttons(assignments):
     return InlineKeyboardMarkup(keyboard), active_count
 
 
-# ================== FETCH DATA ==================
+# ================== IMPROVED FETCH DATA ==================
 async def fetch_data():
     try:
         logger.info("🔄 Fetching data from LMS API...")
-        async with httpx.AsyncClient(timeout=25.0) as client:
-            for attempt in range(4):
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            for attempt in range(6):
+                logger.info(f"📡 Attempt {attempt+1}/6")
                 response = await client.get(API_URL, headers=HEADERS)
-                logger.info(f"📡 Attempt {attempt+1} → Status: {response.status_code}")
+                
+                logger.info(f"   Status: {response.status_code} | Content-Type: {response.headers.get('content-type')}")
+
                 raw_text = response.text.strip()
                 if not raw_text:
-                    logger.warning("Empty body, retrying...")
-                    await asyncio.sleep(1.5)
+                    logger.warning("   Empty response")
+                    await asyncio.sleep(2)
                     continue
-                if raw_text.startswith('<html'):
-                    logger.error("🚫 CAPTCHA or HTML detected!")
-                    await asyncio.sleep(2.0)
+
+                if raw_text.startswith('<html') or '<!DOCTYPE' in raw_text[:200].lower():
+                    logger.error("🚫 Received HTML instead of JSON (protection triggered)")
+                    logger.error(f"   Preview: {raw_text[:350]}...")
+                    await asyncio.sleep(3)
                     continue
+
                 try:
                     data = response.json()
                     count = len(data.get("assignments", []))
                     logger.info(f"✅ SUCCESS! Loaded {count} assignments")
                     return data
                 except Exception as je:
-                    logger.error(f"JSON parse failed: {je}")
-                    await asyncio.sleep(1.0)
+                    logger.error(f"   JSON parse failed: {je}")
+                    await asyncio.sleep(1.5)
                     continue
+
             logger.error("❌ All attempts failed")
             return None
     except Exception as e:
@@ -215,7 +228,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Invalid selection.")
             return
 
-    # Detail views
     ass = context.bot_data.get("selected_assignment")
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")
@@ -280,7 +292,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # Handle send to channel (moved outside the if-elif to fix previous bug)
     if action == "send_to_channel":
         channel_text = context.bot_data.get("pending_channel_text")
         if channel_text:
@@ -307,17 +318,14 @@ async def main_async():
     logger.info("🚀 Starting Assignment Tracking Bot...")
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Register handlers HERE (this was the main issue before)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
-
     application.add_error_handler(lambda update, context: logger.error(f"Error: {context.error}"))
 
     application.post_init = post_init
 
     await application.initialize()
     await application.start()
-
     logger.info("✅ Bot polling started")
 
     try:
@@ -328,7 +336,6 @@ async def main_async():
 
 
 if __name__ == "__main__":
-    # Keep-alive for hosting platforms
     def keep_alive():
         while True:
             logger.info(f"[{time.strftime('%H:%M:%S')}] Keep-alive")

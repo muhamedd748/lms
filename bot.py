@@ -18,8 +18,9 @@ import httpx
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     BOT_TOKEN = "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"
+    print("⚠️ Using fallback hardcoded token - Set BOT_TOKEN as env variable!")
 
-CHANNEL_USERNAME = "@lmsmersa"   # ← Your channel
+CHANNEL_USERNAME = "@lmsmersa"   # Your channel
 
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
 
@@ -85,40 +86,55 @@ def create_assignment_buttons(assignments):
     return InlineKeyboardMarkup(keyboard), active_count
 
 
-# ================== FETCH DATA ==================
+# ================== FETCH DATA (Improved) ==================
 async def fetch_data():
     try:
-        logger.info("🔄 Fetching data from LMS API...")
+        logger.info("🔄 Attempting to fetch data from LMS API...")
+        
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(API_URL, headers=HEADERS)
-            logger.info(f"📡 API Status: {response.status_code}")
+            logger.info(f"📡 API Status Code: {response.status_code}")
 
             if response.status_code not in (200, 202):
-                logger.error(f"❌ Bad status: {response.status_code}")
+                logger.error(f"❌ Unexpected status: {response.status_code}")
                 return None
 
-            data = response.json()
+            # Safely parse JSON
+            try:
+                data = response.json()
+            except Exception as json_err:
+                logger.error(f"❌ JSON decode error: {json_err}")
+                logger.error(f"Response text preview: {response.text[:300]}")
+                return None
+
             count = len(data.get("assignments", []))
-            logger.info(f"✅ Fetched {count} assignments")
+            logger.info(f"✅ SUCCESS! Fetched {count} assignments (Status: {response.status_code})")
             return data
 
+    except httpx.TimeoutException:
+        logger.error("❌ Timeout: API took too long")
+        return None
+    except httpx.RequestError as e:
+        logger.error(f"❌ Network error: {e}")
+        return None
     except Exception as e:
-        logger.error(f"❌ Error fetching data: {e}")
+        logger.error(f"❌ Unexpected error: {type(e).__name__} - {e}")
         return None
 
 
 # ================== SEND TO CHANNEL ==================
 async def send_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
-    """Send summary to @lmsmersa channel"""
+    """Send message to @lmsmersa channel"""
     try:
         await context.bot.send_message(
             chat_id=CHANNEL_USERNAME,
             text=text,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            disable_web_page_preview=True
         )
-        logger.info("✅ Message successfully sent to channel @lmsmersa")
+        logger.info(f"✅ Posted to channel {CHANNEL_USERNAME}")
     except Exception as e:
-        logger.error(f"❌ Failed to send message to channel: {e}")
+        logger.error(f"❌ Failed to post to channel {CHANNEL_USERNAME}: {e}")
 
 
 # ================== MAIN MENU ==================
@@ -129,7 +145,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         context.bot_data["assignment_data"] = data
 
     if not data or "assignments" not in data:
-        text = "❌ Could not fetch data right now.\n\nTry **🔄 Refresh Data**"
+        text = "❌ Could not fetch assignment data right now.\n\nPlease click **🔄 Refresh Data** or try again."
         if edit and update.callback_query:
             await update.callback_query.edit_message_text(text, parse_mode="Markdown")
         else:
@@ -145,19 +161,19 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
 
-# ================== BUTTON HANDLER ==================
+# ================== BUTTON HANDLER (with Channel Posting) ==================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     action = query.data
-    data = context.bot_data.get("assignment_data") or await fetch_data()
 
+    data = context.bot_data.get("assignment_data") or await fetch_data()
     if data and "assignments" in data:
         context.bot_data["assignment_data"] = data
         assignments = data["assignments"]
     else:
-        await query.edit_message_text("❌ No data available.")
+        await query.edit_message_text("❌ No data available. Use /start")
         return
 
     if action == "refresh":
@@ -166,7 +182,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.bot_data["assignment_data"] = data
             assignments = data["assignments"]
         else:
-            await query.edit_message_text("❌ Failed to refresh.")
+            await query.edit_message_text("❌ Failed to refresh. Please try again.")
             return
 
     if action in ["back_to_list", "refresh"]:
@@ -180,39 +196,43 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rate = round(ass.get("statistics", {}).get("submission_rate", 0), 1)
             text += f"**{ass['title']}**\n⏰ {time_str}\n📈 Rate: {rate}%\n\n"
 
-        kb = [[InlineKeyboardButton("⬅ Back", callback_data="back_to_list")]]
+        kb = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
         return
 
     if action.startswith("ass_"):
-        ass_id = int(action[4:])
-        selected = next((a for a in assignments if a.get("assignment_id") == ass_id), None)
-        if not selected:
-            await query.edit_message_text("Assignment not found.")
+        try:
+            ass_id = int(action[4:])
+            selected = next((a for a in assignments if a.get("assignment_id") == ass_id), None)
+            if not selected:
+                await query.edit_message_text("Assignment not found.")
+                return
+
+            context.bot_data["selected_assignment"] = selected
+            time_str = format_time_ago(selected.get("minutes_past", 0))
+
+            text = f"✅ **{selected['title']}**\n⏰ {time_str}\n\nWhat would you like to see?"
+
+            keyboard = [
+                [InlineKeyboardButton("📊 Summary", callback_data="summary_this")],
+                [InlineKeyboardButton("❌ Missing & Late", callback_data="missing_this")],
+                [InlineKeyboardButton("⏳ Deadline Info", callback_data="remaining_this")],
+                [InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")],
+            ]
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+            return
+        except Exception:
+            await query.edit_message_text("Invalid selection.")
             return
 
-        context.bot_data["selected_assignment"] = selected
-        time_str = format_time_ago(selected.get("minutes_past", 0))
-
-        text = f"✅ **{selected['title']}**\n⏰ {time_str}\n\nWhat do you want to see?"
-
-        keyboard = [
-            [InlineKeyboardButton("📊 Summary", callback_data="summary_this")],
-            [InlineKeyboardButton("❌ Missing & Late", callback_data="missing_this")],
-            [InlineKeyboardButton("⏳ Deadline Info", callback_data="remaining_this")],
-            [InlineKeyboardButton("⬅ Back", callback_data="back_to_list")],
-        ]
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-
-    # === DETAIL VIEWS + SEND TO CHANNEL ===
+    # Detail views + Send to Channel
     ass = context.bot_data.get("selected_assignment")
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")
         return
 
     time_str = format_time_ago(ass.get("minutes_past", 0))
-    title = ass['title']
+    title = ass.get("title", "Unknown Assignment")
 
     if action == "summary_this":
         stats = ass.get("statistics", {})
@@ -221,8 +241,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"📊 **Summary**\n**{title}**\n⏰ {time_str}\n\n✅ Submitted: {stats.get('submitted_count', 0)}/{total}\n📈 Rate: {rate}%"
 
         # Send to channel
-        channel_text = f"📊 **Assignment Summary**\n\n**{title}**\n⏰ {time_str}\n✅ Submitted: {stats.get('submitted_count', 0)}/{total}\n📈 Rate: {rate}%"
-        await send_to_channel(context, channel_text)
+        channel_msg = f"📊 **Assignment Summary**\n\n**{title}**\n⏰ {time_str}\n✅ Submitted: {stats.get('submitted_count', 0)}/{total}\n📈 Rate: {rate}%"
+        await send_to_channel(context, channel_msg)
 
     elif action == "missing_this":
         text = f"❌ **Missing & Late Submissions**\n**{title}**\n\n"
@@ -230,31 +250,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         late_list = submissions.get("late", [])
         not_sub_list = submissions.get("not_submitted", [])
 
-        channel_text = f"❌ **Missing & Late Report**\n\n**{title}**\n⏰ {time_str}\n\n"
+        channel_msg = f"❌ **Missing & Late Report**\n\n**{title}**\n⏰ {time_str}\n\n"
 
         if late_list:
             text += "🟠 **Late Submissions:**\n"
-            channel_text += "🟠 **Late:**\n"
+            channel_msg += "🟠 **Late:**\n"
             for s in late_list:
                 late_min = s.get("late_by_minutes", 0)
-                name = s.get('trainee_name', 'Unknown')
+                name = s.get("trainee_name", "Unknown")
                 text += f"• {name} — **{minutes_to_human_late(late_min)}**\n"
-                channel_text += f"• {name} — {minutes_to_human_late(late_min)}\n"
+                channel_msg += f"• {name} — {minutes_to_human_late(late_min)}\n"
 
         if not_sub_list:
             text += "\n🔴 **Not Submitted:**\n"
-            channel_text += "\n🔴 **Not Submitted:**\n"
+            channel_msg += "\n🔴 **Not Submitted:**\n"
             for s in not_sub_list:
-                name = s.get('trainee_name', 'Unknown')
+                name = s.get("trainee_name", "Unknown")
                 text += f"• {name}\n"
-                channel_text += f"• {name}\n"
+                channel_msg += f"• {name}\n"
 
         if not late_list and not not_sub_list:
             text += "🎉 Everyone submitted on time!"
-            channel_text += "🎉 Everyone submitted on time!"
+            channel_msg += "🎉 Everyone submitted on time!"
 
-        # Send detailed report to channel
-        await send_to_channel(context, channel_text)
+        await send_to_channel(context, channel_msg)
 
     else:  # remaining_this
         text = f"⏳ **Deadline Info**\n**{title}**\n\nDeadline passed **{time_str}** ago."
@@ -268,7 +287,7 @@ async def post_init(application):
     commands = [BotCommand("start", "📚 Show Active Assignments")]
     await application.bot.set_my_commands(commands)
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
-    logger.info("✅ Bot commands and menu set")
+    logger.info("✅ Bot commands and menu button set successfully")
 
 
 # ================== MAIN ==================
@@ -281,21 +300,31 @@ async def main_async():
     application.add_handler(CallbackQueryHandler(button_handler))
 
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-        logger.error(f"Error: {context.error}")
+        logger.error(f"Exception while handling update: {context.error}")
 
     application.add_error_handler(error_handler)
     application.post_init = post_init
 
     await application.initialize()
     await application.start()
-    logger.info("✅ Bot is running...")
+    logger.info("✅ Bot is running and polling for updates...")
 
     try:
-        await application.updater.start_polling(drop_pending_updates=True)
+        await application.updater.start_polling(drop_pending_updates=True, allowed_updates=None)
         await asyncio.Event().wait()
     finally:
+        logger.info("🛑 Shutting down bot...")
         await application.stop()
         await application.shutdown()
+
+
+def start_bot():
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped manually")
+    except Exception as e:
+        logger.error(f"Critical error: {e}")
 
 
 if __name__ == "__main__":
@@ -309,7 +338,4 @@ if __name__ == "__main__":
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(update, context, edit=False)
 
-    try:
-        asyncio.run(main_async())
-    except Exception as e:
-        logger.error(f"Critical error: {e}")
+    start_bot()

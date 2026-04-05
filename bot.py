@@ -97,24 +97,25 @@ def create_assignment_buttons(assignments):
     return InlineKeyboardMarkup(keyboard), active_count
 
 
-# ================== FETCH DATA - Strong Retry ==================
+# ================== FETCH DATA - Final Strong Version ==================
 async def fetch_data():
     try:
         logger.info("🔄 Fetching data from LMS API...")
 
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            for attempt in range(3):
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            for attempt in range(4):   # Try 4 times with increasing delay
                 response = await client.get(API_URL, headers=HEADERS)
                 logger.info(f"📡 Attempt {attempt+1} → Status: {response.status_code}")
 
-                if response.status_code not in (200, 202):
-                    await asyncio.sleep(0.5)
+                raw_text = response.text.strip()
+
+                if not raw_text:
+                    logger.warning(f"⚠️ Empty body on attempt {attempt+1}")
+                    await asyncio.sleep(1.2)
                     continue
 
-                raw_text = response.text.strip()
-                if not raw_text:
-                    logger.warning(f"⚠️ Empty body on attempt {attempt+1}, retrying...")
-                    await asyncio.sleep(1.0)
+                if response.status_code not in (200, 202):
+                    await asyncio.sleep(0.8)
                     continue
 
                 try:
@@ -123,11 +124,12 @@ async def fetch_data():
                     logger.info(f"✅ SUCCESS! Loaded {count} assignments")
                     return data
                 except Exception as je:
-                    logger.error(f"JSON parse error: {je}")
-                    await asyncio.sleep(0.5)
+                    logger.error(f"JSON parse failed: {je}")
+                    logger.error(f"Raw response: {raw_text[:500]}")
+                    await asyncio.sleep(1.0)
                     continue
 
-            logger.error("❌ All attempts failed to get valid data")
+            logger.error("❌ All attempts failed - API returning empty or invalid data")
             return None
 
     except Exception as e:
@@ -146,7 +148,7 @@ async def send_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
         )
         logger.info("✅ Sent to @lmsmersa")
     except Exception as e:
-        logger.error(f"Failed to send to channel: {e}")
+        logger.error(f"Channel send failed: {e}")
 
 
 # ================== MAIN MENU ==================
@@ -157,7 +159,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         context.bot_data["assignment_data"] = data
 
     if not data or "assignments" not in data:
-        text = "❌ Could not load assignments right now.\n\nPlease click **🔄 Refresh Data**"
+        text = "❌ Could not load assignments right now.\n\nThe server is busy. Please click **🔄 Refresh Data**"
         if edit and update.callback_query:
             await update.callback_query.edit_message_text(text, parse_mode="Markdown")
         else:
@@ -185,7 +187,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if not data or "assignments" not in data:
-        await query.edit_message_text("❌ No data available. Try Refresh.")
+        await query.edit_message_text("❌ No data available. Try Refresh again.")
         return
 
     assignments = data["assignments"]
@@ -225,7 +227,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Invalid selection.")
             return
 
-    # Detail views
     ass = context.bot_data.get("selected_assignment")
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")

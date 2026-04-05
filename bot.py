@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 
 # ================== UTILITIES ==================
 def format_time_ago(minutes_past: int) -> str:
+    minutes_past = abs(minutes_past)
     if minutes_past < 60:
         return f"{minutes_past} minute{'s' if minutes_past != 1 else ''} ago"
     hours = minutes_past // 60
@@ -50,7 +51,7 @@ def format_time_ago(minutes_past: int) -> str:
 
 
 def format_remaining_time(minutes: int) -> str:
-    """Clean remaining time display"""
+    minutes = abs(minutes)
     if minutes < 60:
         return f"{minutes} minute{'s' if minutes != 1 else ''}"
     hours = minutes // 60
@@ -81,7 +82,7 @@ def create_assignment_buttons(assignments):
     active_count = 0
     for ass in assignments:
         mins = ass.get("minutes_past", 0)
-        days = mins // 1440
+        days = abs(mins) // 1440
         if days <= 5:
             active_count += 1
             short_title = ass["title"][:38] + "..." if len(ass["title"]) > 38 else ass["title"]
@@ -96,22 +97,24 @@ def create_assignment_buttons(assignments):
     return InlineKeyboardMarkup(keyboard), active_count
 
 
-# ================== FETCH DATA - Reliable ==================
+# ================== FETCH DATA - Strong Retry ==================
 async def fetch_data():
     try:
-        logger.info("🔄 Fetching from LMS API...")
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            for attempt in range(3):  # Try 3 times
+        logger.info("🔄 Fetching data from LMS API...")
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            for attempt in range(3):
                 response = await client.get(API_URL, headers=HEADERS)
-                logger.info(f"📡 Attempt {attempt+1} - Status: {response.status_code}")
+                logger.info(f"📡 Attempt {attempt+1} → Status: {response.status_code}")
 
                 if response.status_code not in (200, 202):
+                    await asyncio.sleep(0.5)
                     continue
 
-                raw = response.text.strip()
-                if not raw:
-                    logger.warning("⚠️ Empty body - retrying...")
-                    await asyncio.sleep(0.7)
+                raw_text = response.text.strip()
+                if not raw_text:
+                    logger.warning(f"⚠️ Empty body on attempt {attempt+1}, retrying...")
+                    await asyncio.sleep(1.0)
                     continue
 
                 try:
@@ -120,14 +123,15 @@ async def fetch_data():
                     logger.info(f"✅ SUCCESS! Loaded {count} assignments")
                     return data
                 except Exception as je:
-                    logger.error(f"JSON error: {je}")
+                    logger.error(f"JSON parse error: {je}")
+                    await asyncio.sleep(0.5)
                     continue
 
-            logger.error("❌ Failed after 3 attempts")
+            logger.error("❌ All attempts failed to get valid data")
             return None
 
     except Exception as e:
-        logger.error(f"❌ Fetch error: {e}")
+        logger.error(f"❌ Critical fetch error: {e}")
         return None
 
 
@@ -142,7 +146,7 @@ async def send_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
         )
         logger.info("✅ Sent to @lmsmersa")
     except Exception as e:
-        logger.error(f"Channel send failed: {e}")
+        logger.error(f"Failed to send to channel: {e}")
 
 
 # ================== MAIN MENU ==================
@@ -181,7 +185,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if not data or "assignments" not in data:
-        await query.edit_message_text("❌ No data available.")
+        await query.edit_message_text("❌ No data available. Try Refresh.")
         return
 
     assignments = data["assignments"]
@@ -189,7 +193,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "all_assignments":
         text = "📋 **All Assignments**\n\n"
         for ass in assignments:
-            time_str = format_time_ago(abs(ass.get("minutes_past", 0)))
+            time_str = format_time_ago(ass.get("minutes_past", 0))
             rate = round(ass.get("statistics", {}).get("submission_rate", 0), 1)
             text += f"**{ass['title']}**\n⏰ {time_str}\n📈 Rate: {rate}%\n\n"
         kb = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
@@ -236,13 +240,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total = stats.get("submitted_count", 0) + stats.get("not_submitted_count", 0)
 
         if minutes_past < 0:
-            # Deadline NOT passed → Show Remaining Time
-            remaining_min = abs(minutes_past)
-            time_display = f"⏳ **{format_remaining_time(remaining_min)} remaining**"
+            time_display = f"⏳ **{format_remaining_time(abs(minutes_past))} remaining**"
         else:
-            # Deadline passed → Show clean "passed X time ago"
-            passed_time = format_time_ago(minutes_past)
-            time_display = f"⏰ Deadline passed **{passed_time}**"
+            time_display = f"⏰ Deadline passed **{format_time_ago(minutes_past)}**"
 
         text = f"📊 **Summary**\n**{title}**\n{time_display}\n\n✅ Submitted: {stats.get('submitted_count', 0)}/{total}\n📈 Rate: {rate}%"
 
@@ -253,6 +253,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]
         ]
         context.bot_data["pending_channel_text"] = channel_text
+
     elif action == "missing_this":
         submissions = ass.get("submissions", {})
         late_list = submissions.get("late", [])
@@ -290,8 +291,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     else:  # remaining_this
         if minutes_past < 0:
-            remaining_min = abs(minutes_past)
-            time_str = format_remaining_time(remaining_min)
+            time_str = format_remaining_time(abs(minutes_past))
             text = f"⏳ **Remaining Time**\n**{title}**\n\n**{time_str} remaining** until deadline."
         else:
             text = f"⏰ **Deadline Info**\n**{title}**\n\nDeadline passed **{format_time_ago(minutes_past)}** ago."

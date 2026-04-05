@@ -159,6 +159,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
 
 # ================== BUTTON HANDLER (with Send to Channel button) ==================
 # ================== BUTTON HANDLER ==================
+# ================== BUTTON HANDLER ==================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -178,7 +179,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "all_assignments":
         text = "📋 **All Assignments**\n\n"
         for ass in assignments:
-            time_str = format_time_ago(ass.get("minutes_past", 0))
+            time_str = format_time_ago(abs(ass.get("minutes_past", 0)))   # Fixed possible negative
             rate = round(ass.get("statistics", {}).get("submission_rate", 0), 1)
             text += f"**{ass['title']}**\n⏰ {time_str}\n📈 Rate: {rate}%\n\n"
         kb = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
@@ -194,7 +195,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             context.bot_data["selected_assignment"] = selected
-            time_str = format_time_ago(selected.get("minutes_past", 0))
+            time_str = format_time_ago(abs(selected.get("minutes_past", 0)))
 
             text = f"✅ **{selected['title']}**\n⏰ {time_str}\n\nWhat would you like to see?"
 
@@ -219,26 +220,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     minutes_past = ass.get("minutes_past", 0)
     title = ass.get("title", "Unknown Assignment")
 
-    # New Smart Time Display for Summary
+    # ====================== SUMMARY ======================
     if action == "summary_this":
         stats = ass.get("statistics", {})
         rate = round(stats.get("submission_rate", 0), 1)
         total = stats.get("submitted_count", 0) + stats.get("not_submitted_count", 0)
 
         if minutes_past < 0:
-            # Deadline not passed yet → show remaining time
-            remaining_minutes = abs(minutes_past)
-            if remaining_minutes < 60:
-                time_display = f"⏳ **{remaining_minutes} minutes remaining**"
+            # Deadline NOT passed yet → Show Remaining Time
+            remaining_min = abs(minutes_past)
+            if remaining_min < 60:
+                time_display = f"⏳ **{remaining_min} minute{'s' if remaining_min != 1 else ''} remaining**"
             else:
-                hours = remaining_minutes // 60
-                mins = remaining_minutes % 60
+                hours = remaining_min // 60
+                mins = remaining_min % 60
                 if mins == 0:
                     time_display = f"⏳ **{hours} hour{'s' if hours != 1 else ''} remaining**"
                 else:
                     time_display = f"⏳ **{hours} hour{'s' if hours != 1 else ''} {mins} minute{'s' if mins != 1 else ''} remaining**"
         else:
-            # Deadline already passed
+            # Deadline passed
             time_display = f"⏰ Deadline passed **{format_time_ago(minutes_past)}** ago"
 
         text = f"📊 **Summary**\n**{title}**\n{time_display}\n\n✅ Submitted: {stats.get('submitted_count', 0)}/{total}\n📈 Rate: {rate}%"
@@ -251,14 +252,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         context.bot_data["pending_channel_text"] = channel_text
 
+    # ====================== MISSING & LATE ======================
     elif action == "missing_this":
-        # ... (keep your existing missing_this code as it is)
         submissions = ass.get("submissions", {})
         late_list = submissions.get("late", [])
         not_sub_list = submissions.get("not_submitted", [])
 
         text = f"❌ **Missing & Late Submissions**\n**{title}**\n\n"
-        channel_text = f"❌ **Missing & Late Report**\n\n**{title}**\n⏰ {format_time_ago(minutes_past)}\n\n"
+        channel_text = f"❌ **Missing & Late Report**\n\n**{title}**\n⏰ {format_time_ago(abs(minutes_past))}\n\n"
 
         if late_list:
             text += "🟠 **Late Submissions:**\n"
@@ -288,12 +289,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data["pending_channel_text"] = channel_text
 
     else:  # remaining_this
-        text = f"⏳ **Deadline Info**\n**{title}**\n\n"
         if minutes_past < 0:
-            remaining = abs(minutes_past)
-            text += f"**{format_remaining_time(remaining)} remaining until deadline**"
+            remaining_min = abs(minutes_past)
+            time_str = format_remaining_time(remaining_min)
+            text = f"⏳ **Remaining Time**\n**{title}**\n\n**{time_str} remaining** until deadline."
         else:
-            text += f"Deadline passed **{format_time_ago(minutes_past)}** ago"
+            text = f"⏰ **Deadline Info**\n**{title}**\n\nDeadline passed **{format_time_ago(minutes_past)}** ago."
 
         keyboard = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
 
@@ -303,9 +304,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_text = context.bot_data.get("pending_channel_text")
         if channel_text:
             await send_to_channel(context, channel_text)
-            await query.edit_message_text("✅ Message sent to @lmsmersa successfully!")
+            await query.edit_message_text("✅ Sent to @lmsmersa successfully!")
         return
-
 
 # ================== POST INIT & MAIN (same) ==================
 async def post_init(application):

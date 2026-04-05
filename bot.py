@@ -18,7 +18,7 @@ import httpx
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     BOT_TOKEN = "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"
-    print("⚠️ Using fallback hardcoded token!")
+    print("⚠️ Using fallback hardcoded token - Set BOT_TOKEN as env variable!")
 
 CHANNEL_USERNAME = "@lmsmersa"
 
@@ -86,7 +86,7 @@ def create_assignment_buttons(assignments):
     return InlineKeyboardMarkup(keyboard), active_count
 
 
-# ================== FETCH DATA ==================
+# ================== FETCH DATA (Fixed) ==================
 async def fetch_data():
     try:
         logger.info("🔄 Attempting to fetch data from LMS API...")
@@ -99,18 +99,31 @@ async def fetch_data():
                 logger.error(f"❌ Unexpected status: {response.status_code}")
                 return None
 
+            # Safely handle non-JSON responses
+            text = response.text.strip()
+            if not text:
+                logger.error("❌ Empty response from API")
+                return None
+
             try:
                 data = response.json()
             except Exception as json_err:
                 logger.error(f"❌ JSON decode error: {json_err}")
+                logger.error(f"Response preview: {text[:300]}")
                 return None
 
             count = len(data.get("assignments", []))
             logger.info(f"✅ SUCCESS! Fetched {count} assignments")
             return data
 
+    except httpx.TimeoutException:
+        logger.error("❌ Timeout: API took too long")
+        return None
+    except httpx.RequestError as e:
+        logger.error(f"❌ Network error: {e}")
+        return None
     except Exception as e:
-        logger.error(f"❌ Error fetching data: {e}")
+        logger.error(f"❌ Unexpected error: {type(e).__name__} - {e}")
         return None
 
 
@@ -123,10 +136,10 @@ async def send_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
-        logger.info(f"✅ Successfully posted to {CHANNEL_USERNAME}")
+        logger.info(f"✅ Posted to channel {CHANNEL_USERNAME}")
         return True
     except Exception as e:
-        logger.error(f"❌ Failed to send to channel: {e}")
+        logger.error(f"❌ Failed to post to channel: {e}")
         return False
 
 
@@ -138,7 +151,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
         context.bot_data["assignment_data"] = data
 
     if not data or "assignments" not in data:
-        text = "❌ Could not fetch assignment data right now.\n\nPlease click **🔄 Refresh Data**."
+        text = "❌ Could not fetch assignment data right now.\n\nPlease click **🔄 Refresh Data** or try again."
         if edit and update.callback_query:
             await update.callback_query.edit_message_text(text, parse_mode="Markdown")
         else:
@@ -160,20 +173,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     action = query.data
-    data = context.bot_data.get("assignment_data") or await fetch_data()
 
-    if data and "assignments" in data:
-        context.bot_data["assignment_data"] = data
-        assignments = data["assignments"]
-    else:
-        await query.edit_message_text("❌ No data available. Use /start")
-        return
-
+    # Refresh or back
     if action == "refresh":
         data = await fetch_data()
         if data and "assignments" in data:
             context.bot_data["assignment_data"] = data
-            assignments = data["assignments"]
         else:
             await query.edit_message_text("❌ Failed to refresh.")
             return
@@ -181,6 +186,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action in ["back_to_list", "refresh"]:
         await show_main_menu(update, context, edit=True)
         return
+
+    data = context.bot_data.get("assignment_data") or await fetch_data()
+    if not data or "assignments" not in data:
+        await query.edit_message_text("❌ No data available. Use /start")
+        return
+
+    assignments = data["assignments"]
 
     if action == "all_assignments":
         text = "📋 **All Assignments**\n\n"
@@ -217,7 +229,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Invalid selection.")
             return
 
-    # === DETAIL VIEWS ===
+    # === Detail Views with Send Button ===
     ass = context.bot_data.get("selected_assignment")
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")
@@ -235,9 +247,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel_text = f"📊 **Assignment Summary**\n\n**{title}**\n⏰ {time_str}\n✅ Submitted: {stats.get('submitted_count', 0)}/{total}\n📈 Rate: {rate}%"
 
         keyboard = [
-            [InlineKeyboardButton("📢 Send to Channel", callback_data="send_summary")],
+            [InlineKeyboardButton("📢 Send to Channel", callback_data="send_to_channel")],
             [InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]
         ]
+        context.bot_data["pending_channel_text"] = channel_text
 
     elif action == "missing_this":
         submissions = ass.get("submissions", {})
@@ -269,9 +282,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             channel_text += "🎉 Everyone submitted on time!"
 
         keyboard = [
-            [InlineKeyboardButton("📢 Send to Channel", callback_data="send_missing")],
+            [InlineKeyboardButton("📢 Send to Channel", callback_data="send_to_channel")],
             [InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]
         ]
+        context.bot_data["pending_channel_text"] = channel_text
 
     else:  # remaining_this
         user_text = f"⏳ **Deadline Info**\n**{title}**\n\nDeadline passed **{time_str}** ago."
@@ -279,22 +293,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text(user_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    # Store channel text temporarily so we can send it later
-    if action in ["summary_this", "missing_this"]:
-        context.bot_data["pending_channel_text"] = channel_text
-
-
-# ================== Handle Send to Channel Button ==================
-    if action == "send_summary" or action == "send_missing":
+    # Handle Send to Channel action
+    if action == "send_to_channel":
         channel_text = context.bot_data.get("pending_channel_text")
         if channel_text:
             success = await send_to_channel(context, channel_text)
             if success:
-                await query.edit_message_text("✅ Message successfully sent to @lmsmersa channel!", parse_mode="Markdown")
+                await query.edit_message_text("✅ Message successfully sent to @lmsmersa!", parse_mode="Markdown")
             else:
                 await query.edit_message_text("❌ Failed to send to channel. Please try again.")
         else:
-            await query.edit_message_text("❌ No message to send.")
+            await query.edit_message_text("❌ No message ready to send.")
         return
 
 
@@ -308,7 +317,7 @@ async def post_init(application):
 
 # ================== MAIN ==================
 async def main_async():
-    logger.info("🚀 Starting Assignment Tracking Bot with Manual Channel Posting...")
+    logger.info("🚀 Starting Assignment Tracking Bot with Manual Channel Button...")
 
     application = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -323,12 +332,13 @@ async def main_async():
 
     await application.initialize()
     await application.start()
-    logger.info("✅ Bot is running...")
+    logger.info("✅ Bot is running and polling for updates...")
 
     try:
         await application.updater.start_polling(drop_pending_updates=True, allowed_updates=None)
         await asyncio.Event().wait()
     finally:
+        logger.info("🛑 Shutting down bot...")
         await application.stop()
         await application.shutdown()
 

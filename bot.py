@@ -7,6 +7,8 @@ import random
 import json
 import gzip
 import zlib
+import socket
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
     ApplicationBuilder,
@@ -15,6 +17,18 @@ from telegram.ext import (
     ContextTypes,
 )
 import httpx
+
+# ================== STRONGER FORCE IPv4 (Important for Ethiopia) ==================
+socket.setdefaulttimeout(60)
+
+original_getaddrinfo = socket.getaddrinfo
+
+def force_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    # Force only IPv4 addresses - ignores IPv6 completely
+    return original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+socket.getaddrinfo = force_ipv4_getaddrinfo
+# =============================================================================
 
 # ================== CONFIG ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN") or "8679659340:AAFyjVDpaX8RcVYwJ8WK5Dj7oS9OKf5xibU"
@@ -67,28 +81,44 @@ def minutes_to_human_late(minutes: int) -> str:
         return f"{days} day{'s' if days != 1 else ''} late"
     return f"{days} day{'s' if days != 1 else ''} {hours_left} hour{'s' if hours_left != 1 else ''} late"
 
+def extract_minutes_past(ass: dict) -> int:
+    try:
+        rem = ass.get("minutes_remaining") or ass.get("remaining_minutes")
+        if rem is not None and str(rem).strip() != "":
+            rem_val = int(float(rem))
+            if rem_val > 0:
+                return -rem_val
+        past = ass.get("minutes_past")
+        if past is not None and str(past).strip() != "":
+            return int(float(past))
+    except (ValueError, TypeError):
+        pass
+    return 0
+
 def create_assignment_buttons(assignments):
     keyboard = []
     active_count = 0
     for ass in assignments:
-        mins = ass.get("minutes_past", 0)
+        mins = extract_minutes_past(ass)
         days = abs(mins) // 1440
         if days <= 5:
             active_count += 1
             short_title = ass["title"][:38] + "..." if len(ass["title"]) > 38 else ass["title"]
             keyboard.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"ass_{ass['assignment_id']}")])
+    
     if not keyboard:
         keyboard.append([InlineKeyboardButton("No recent assignments (≤5 days)", callback_data="none")])
+    
     keyboard.append([InlineKeyboardButton("📋 View All Assignments", callback_data="all_assignments")])
     keyboard.append([InlineKeyboardButton("🔄 Refresh Data", callback_data="refresh")])
+    
     return InlineKeyboardMarkup(keyboard), active_count
 
-# ================== MAIN FETCH FUNCTION (Improved Diagnostics) ==================
+# ================== FETCH DATA ==================
 async def fetch_data():
     try:
         logger.info("🔄 Fetching data from LMS API...")
-
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
             for attempt in range(10):
                 if attempt > 0:
                     delay = random.uniform(8, 20)
@@ -107,30 +137,19 @@ async def fetch_data():
 
                 logger.info(f"📡 Attempt {attempt+1}/10 | Status: {response.status_code} | Size: {size} bytes")
 
-                # === Save raw response for debugging ===
-                debug_filename = f"last_response_{int(time.time())}.bin"
-                with open(debug_filename, "wb") as f:
-                    f.write(content)
-                logger.info(f"💾 Saved raw response to: {debug_filename}")
-
                 if size < 50:
                     logger.warning("Response too small")
                     continue
 
-                # Try decode
                 try:
                     text = content.decode("utf-8").strip()
                 except:
                     text = content.decode("utf-8", errors="replace").strip()
 
-                logger.info(f"First 400 characters: {repr(text[:400])}")
-
-                # Check for captcha
-                if b"sgcaptcha" in content.lower() or "well-known/sgcaptcha" in text.lower():
+                if b"sgcaptcha" in content.lower() or "sgcaptcha" in text.lower():
                     logger.error("🚫 SGCaptcha / Anti-Bot detected!")
                     continue
 
-                # Try JSON
                 try:
                     data = json.loads(text)
                     count = len(data.get("assignments", []))
@@ -147,14 +166,13 @@ async def fetch_data():
                         else:
                             decompressed = zlib.decompress(content)
                         dec_text = decompressed.decode("utf-8", errors="replace")
-                        logger.info(f"✅ Successfully decompressed with {method}")
                         data = json.loads(dec_text)
-                        logger.info(f"✅ SUCCESS after decompression! Loaded {len(data.get('assignments', []))} assignments")
+                        logger.info(f"✅ SUCCESS after {method} decompression!")
                         return data
                     except:
                         continue
 
-        logger.error("❌ All 10 attempts failed. Server returning invalid data.")
+        logger.error("❌ All 10 attempts failed.")
         return None
 
     except Exception as e:
@@ -210,6 +228,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action in ["back_to_list", "refresh"]:
+        if action == "refresh":
+            context.bot_data["assignment_data"] = None  # Force re-fetch
         await show_main_menu(update, context, edit=True)
         return
 
@@ -223,9 +243,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "all_assignments":
         text = "📋 **All Assignments**\n\n"
         for ass in assignments:
-            time_str = format_time_ago(ass.get("minutes_past", 0))
+            mins = extract_minutes_past(ass)
+            if mins < 0:
+                time_str = f"⏳ {format_remaining_time(abs(mins))} remaining"
+            elif mins == 0:
+                time_str = "⏰ Deadline is right now"
+            else:
+                time_str = f"⏰ Passed {format_time_ago(mins)}"
+            
             rate = round(ass.get("statistics", {}).get("submission_rate", 0), 1)
-            text += f"**{ass['title']}**\n⏰ {time_str}\n📈 Rate: {rate}%\n\n"
+            text += f"**{ass['title']}**\n{time_str}\n📈 Rate: {rate}%\n\n"
+
         kb = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
         return
@@ -237,9 +265,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not selected:
                 await query.edit_message_text("Assignment not found.")
                 return
+
             context.bot_data["selected_assignment"] = selected
-            time_str = format_time_ago(abs(selected.get("minutes_past", 0)))
-            text = f"✅ **{selected['title']}**\n⏰ {time_str}\n\nWhat would you like to see?"
+            mins = extract_minutes_past(selected)
+
+            if mins < 0:
+                time_str = f"⏳ {format_remaining_time(abs(mins))} remaining"
+            elif mins == 0:
+                time_str = "⏰ Deadline is right now"
+            else:
+                time_str = f"⏰ Passed {format_time_ago(mins)}"
+
+            text = f"✅ **{selected['title']}**\n{time_str}\n\nWhat would you like to see?"
             keyboard = [
                 [InlineKeyboardButton("📊 Summary", callback_data="summary_this")],
                 [InlineKeyboardButton("❌ Missing & Late", callback_data="missing_this")],
@@ -258,16 +295,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ No assignment selected.")
         return
 
-    minutes_past = ass.get("minutes_past", 0)
+    minutes_past = extract_minutes_past(ass)
     title = ass.get("title", "Unknown Assignment")
 
     if action == "summary_this":
         stats = ass.get("statistics", {})
         rate = round(stats.get("submission_rate", 0), 1)
         total = stats.get("submitted_count", 0) + stats.get("not_submitted_count", 0)
-        time_display = f"⏳ **{format_remaining_time(abs(minutes_past))} remaining**" if minutes_past < 0 else f"⏰ Deadline passed **{format_time_ago(minutes_past)}**"
+
+        if minutes_past < 0:
+            time_display = f"⏳ **{format_remaining_time(abs(minutes_past))} remaining**"
+        elif minutes_past == 0:
+            time_display = "⏰ **Deadline is right now**"
+        else:
+            time_display = f"⏰ Deadline passed **{format_time_ago(minutes_past)}**"
+
         text = f"📊 **Summary**\n**{title}**\n{time_display}\n\n✅ Submitted: {stats.get('submitted_count', 0)}/{total}\n📈 Rate: {rate}%"
         channel_text = f"📊 **Assignment Summary**\n\n**{title}**\n{time_display}\n✅ Submitted: {stats.get('submitted_count', 0)}/{total}\n📈 Rate: {rate}%"
+
         keyboard = [
             [InlineKeyboardButton("📢 Send to Channel", callback_data="send_to_channel")],
             [InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]
@@ -278,8 +323,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         submissions = ass.get("submissions", {})
         late_list = submissions.get("late", [])
         not_sub_list = submissions.get("not_submitted", [])
+
         text = f"❌ **Missing & Late Submissions**\n**{title}**\n\n"
         channel_text = f"❌ **Missing & Late Report**\n\n**{title}**\n\n"
+
         if late_list:
             text += "🟠 **Late Submissions:**\n"
             channel_text += "🟠 **Late:**\n"
@@ -288,6 +335,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name = s.get("trainee_name", "Unknown")
                 text += f"• {name} — **{minutes_to_human_late(late_min)}**\n"
                 channel_text += f"• {name} — {minutes_to_human_late(late_min)}\n"
+
         if not_sub_list:
             text += "\n🔴 **Not Submitted:**\n"
             channel_text += "\n🔴 **Not Submitted:**\n"
@@ -295,9 +343,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name = s.get("trainee_name", "Unknown")
                 text += f"• {name}\n"
                 channel_text += f"• {name}\n"
+
         if not late_list and not not_sub_list:
             text += "🎉 Everyone submitted on time!"
             channel_text += "🎉 Everyone submitted on time!"
+
         keyboard = [
             [InlineKeyboardButton("📢 Send to Channel", callback_data="send_to_channel")],
             [InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]
@@ -307,6 +357,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:  # remaining_this
         if minutes_past < 0:
             text = f"⏳ **Remaining Time**\n**{title}**\n\n**{format_remaining_time(abs(minutes_past))} remaining**"
+        elif minutes_past == 0:
+            text = f"⏰ **Deadline Info**\n**{title}**\n\n**Deadline is right now!**"
         else:
             text = f"⏰ **Deadline Info**\n**{title}**\n\nDeadline passed **{format_time_ago(minutes_past)}**."
         keyboard = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
@@ -317,42 +369,79 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update, context, edit=False)
 
-# ================== MAIN ==================
+# ================== POST INIT ==================
 async def post_init(application):
     commands = [BotCommand("start", "📚 Show Active Assignments")]
     await application.bot.set_my_commands(commands)
     await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     logger.info("✅ Bot commands set")
 
+# ================== MAIN ASYNC ==================
 async def main_async():
     logger.info("🚀 Starting Assignment Tracking Bot...")
-    application = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # Custom HTTPX client - Very important for Ethiopia networks
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=45.0, read=70.0, write=60.0, pool=60.0),
+        limits=httpx.Limits(max_connections=10, max_keepalive_connections=5, keepalive_expiry=30),
+        follow_redirects=True,
+        http2=False,                    # Disable HTTP/2 (more stable on some networks)
+    )
+
+    application = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .http_client(http_client)       # <-- This fixes most connection issues
+        .connect_timeout(60)
+        .read_timeout(60)
+        .write_timeout(60)
+        .pool_timeout(60)
+        .build()
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
 
-    async def error_handler(update, context):
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Error: {context.error}")
+
     application.add_error_handler(error_handler)
     application.post_init = post_init
 
-    await application.initialize()
-    await application.start()
-    logger.info("✅ Bot polling started")
+    # Robust startup with retry
+    for attempt in range(7):
+        try:
+            await application.initialize()
+            await application.start()
+            logger.info(f"✅ Bot initialized successfully (attempt {attempt+1})")
+            break
+        except Exception as e:
+            logger.warning(f"Startup attempt {attempt+1}/7 failed: {type(e).__name__} - {e}")
+            if attempt == 6:
+                logger.error("❌ All startup attempts failed. Check your internet connection.")
+                raise
+            delay = 8 * (attempt + 1) + random.uniform(0, 5)
+            await asyncio.sleep(delay)
 
+    logger.info("✅ Bot polling started")
     try:
         await application.updater.start_polling(drop_pending_updates=True)
         await asyncio.Event().wait()
     finally:
         await application.stop()
 
+# ================== KEEP ALIVE + RUN ==================
 if __name__ == "__main__":
     def keep_alive():
         while True:
             logger.info(f"[{time.strftime('%H:%M:%S')}] Keep-alive ping")
             time.sleep(300)
+
     threading.Thread(target=keep_alive, daemon=True).start()
 
     try:
         asyncio.run(main_async())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")
     except Exception as e:
         logger.error(f"Critical error: {e}")

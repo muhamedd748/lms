@@ -74,16 +74,14 @@ def minutes_to_human_late(minutes: int) -> str:
         return f"{days} day{'s' if days != 1 else ''} late"
     return f"{days} day{'s' if days != 1 else ''} {hours_left} hour{'s' if hours_left != 1 else ''} late"
 
-# ================== FIXED BUTTON CREATOR ==================
+# ================== FIXED: BUTTON CREATOR ==================
 def create_assignment_buttons(assignments):
     keyboard = []
     active_count = 0
     for ass in assignments:
         mins = ass.get("minutes_past", 0)
-        days = abs(mins) // 1440
-
-        # Show assignments that are upcoming OR passed within last 7 days (improved)
-        if mins >= - (7 * 1440):   # Allow up to 7 days in the future
+        # Improved filter: show upcoming assignments + those passed within last 7 days
+        if mins >= - (7 * 1440):  
             active_count += 1
             short_title = ass["title"][:38] + "..." if len(ass["title"]) > 38 else ass["title"]
             keyboard.append([InlineKeyboardButton(f"📌 {short_title}", callback_data=f"ass_{ass['assignment_id']}")])
@@ -93,10 +91,9 @@ def create_assignment_buttons(assignments):
 
     keyboard.append([InlineKeyboardButton("📋 View All Assignments", callback_data="all_assignments")])
     keyboard.append([InlineKeyboardButton("🔄 Refresh Data", callback_data="refresh")])
-
     return InlineKeyboardMarkup(keyboard), active_count
 
-# ================== FETCH DATA ==================
+# ================== FIXED: FETCH DATA (Handles 202 status + better HTML check) ==================
 async def fetch_data():
     try:
         logger.info("🔄 Fetching data from LMS API...")
@@ -104,15 +101,27 @@ async def fetch_data():
             for attempt in range(6):
                 if attempt > 0:
                     await asyncio.sleep(random.uniform(1.5, 3.5))
+                
                 response = await client.get(API_URL, headers=HEADERS)
-                logger.info(f"📡 Attempt {attempt+1}/6 | Status: {response.status_code}")
+                logger.info(f"📡 Attempt {attempt+1}/6 | Status: {response.status_code} | Body length: {len(response.text)}")
+
                 raw_text = response.text.strip()
                 if not raw_text:
                     logger.warning("Empty body received from server")
                     continue
-                if raw_text.startswith('<html'):
-                    logger.error("🚫 Server returned HTML")
+
+                # Accept both 200 OK and 202 Accepted
+                if response.status_code not in (200, 202):
+                    logger.warning(f"Unexpected status: {response.status_code}")
                     continue
+
+                # Stronger check for HTML (server protection, error page, etc.)
+                lower_text = raw_text.lower()
+                if lower_text.startswith('<') and ('<html' in lower_text or '<!doctype' in lower_text or '<head' in lower_text):
+                    logger.error("🚫 Server returned HTML (captcha/protection/error page)")
+                    logger.error(f"Preview: {raw_text[:400]}")
+                    continue
+
                 try:
                     data = response.json()
                     count = len(data.get("assignments", []))
@@ -120,8 +129,10 @@ async def fetch_data():
                     return data
                 except Exception as je:
                     logger.error(f"JSON parse failed: {je}")
+                    logger.error(f"First 300 chars: {raw_text[:300]}")
                     continue
-            logger.error("❌ All attempts failed")
+
+            logger.error("❌ All attempts failed - Server not returning valid JSON")
             return None
     except Exception as e:
         logger.error(f"❌ Fetch error: {e}")
@@ -140,7 +151,7 @@ async def send_to_channel(context: ContextTypes.DEFAULT_TYPE, text: str):
     except Exception as e:
         logger.error(f"Channel send failed: {e}")
 
-# ================== MAIN MENU (Updated Text) ==================
+# ================== MAIN MENU ==================
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = True):
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if data and "assignments" in data:
@@ -156,14 +167,14 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
 
     keyboard, active = create_assignment_buttons(data["assignments"])
     
-    text = f"📚 **Active Assignments** ({active})\n_Upcoming or deadline passed within last 7 days_\n\nSelect an assignment:"
+    text = f"📚 **Active Assignments** ({active})\n_Upcoming or passed within last 7 days_\n\nSelect an assignment:"
 
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     else:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
-# ================== BUTTON HANDLER (Small improvements) ==================
+# ================== BUTTON HANDLER ==================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -224,7 +235,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("Invalid selection.")
             return
 
-    # Detail views (rest remains mostly the same - only small fix for time display)
+    # Detail views
     ass = context.bot_data.get("selected_assignment")
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")
@@ -253,7 +264,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data["pending_channel_text"] = channel_text
 
     elif action == "missing_this":
-        # (your existing code for missing_this - no change needed)
         submissions = ass.get("submissions", {})
         late_list = submissions.get("late", [])
         not_sub_list = submissions.get("not_submitted", [])

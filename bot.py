@@ -4,9 +4,6 @@ import time
 import logging
 import threading
 import random
-import json
-import gzip
-import zlib
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, MenuButtonCommands
 from telegram.ext import (
     ApplicationBuilder,
@@ -23,14 +20,11 @@ if not BOT_TOKEN:
 
 CHANNEL_USERNAME = "@lmsmersa"
 API_URL = "https://lms.mersamedia.org/api_assignment_tracking.php?key=MMI_SECRET_2026"
-
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
     "Accept": "application/json, text/html, */*",
     "Accept-Language": "en-US,en;q=0.9",
     "Referer": "https://lms.mersamedia.org/",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
 }
 
 # ================== LOGGING ==================
@@ -40,7 +34,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ================== UTILITIES (unchanged) ==================
+# ================== UTILITIES ==================
 def format_time_ago(minutes_past: int) -> str:
     minutes_past = abs(minutes_past)
     if minutes_past < 60:
@@ -95,83 +89,35 @@ def create_assignment_buttons(assignments):
     keyboard.append([InlineKeyboardButton("🔄 Refresh Data", callback_data="refresh")])
     return InlineKeyboardMarkup(keyboard), active_count
 
-# ================== FIXED & IMPROVED FETCH DATA (MAIN FIX) ==================
+# ================== FETCH DATA ==================
 async def fetch_data():
     try:
         logger.info("🔄 Fetching data from LMS API...")
-
-        # Stronger timeout + follow redirects
-        timeout = httpx.Timeout(60.0, connect=15.0)
-
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            for attempt in range(10):  # Increased retries
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for attempt in range(6):
                 if attempt > 0:
-                    delay = random.uniform(5.0, 13.0)
-                    logger.info(f"⏳ Retry {attempt}/10 after {delay:.1f}s delay")
-                    await asyncio.sleep(delay)
-
+                    await asyncio.sleep(random.uniform(1.5, 3.5))
                 response = await client.get(API_URL, headers=HEADERS)
-                logger.info(f"📡 Attempt {attempt+1}/10 | Status: {response.status_code} | Bytes: {len(response.content)}")
-
-                content = response.content
-
-                # === EARLY GARBAGE / BINARY DETECTION ===
-                if len(content) < 50 or content[:1] in (b'\x15', b'\x00', b'\x1f') or b'\x00' in content[:300]:
-                    logger.error("🚨 Received binary/garbage data (anti-bot or server error)")
-                    continue
-
-                # === MANUAL DECOMPRESSION (if httpx didn't handle it) ===
-                encoding = response.headers.get("content-encoding", "").lower()
-                if encoding:
-                    try:
-                        if "gzip" in encoding:
-                            content = gzip.decompress(content)
-                        elif "deflate" in encoding:
-                            content = zlib.decompress(content)
-                        logger.info(f"✅ Decompressed {encoding}")
-                    except Exception as decomp_err:
-                        logger.warning(f"Decompression failed: {decomp_err}")
-
-                # === DECODE WITH FALLBACK ===
-                try:
-                    raw_text = content.decode("utf-8").strip()
-                except UnicodeDecodeError:
-                    logger.warning("UTF-8 decode failed → using replace mode")
-                    raw_text = content.decode("utf-8", errors="replace").strip()
-
+                logger.info(f"📡 Attempt {attempt+1}/6 | Status: {response.status_code}")
+                raw_text = response.text.strip()
                 if not raw_text:
-                    logger.warning("Empty body after decoding")
+                    logger.warning("Empty body received from server")
                     continue
-
-                # === STRONG ANTI-BOT / HTML CHECK ===
-                lower_text = raw_text.lower()
-                if any(word in lower_text for word in [
-                    'sgcaptcha', 'captcha', 'robot', 'cloudflare',
-                    'access denied', '<html', '<!doctype', '<head', 'forbidden'
-                ]):
-                    logger.error("🚫 Anti-bot protection triggered!")
-                    logger.error(f"Preview: {raw_text[:700]}")
+                if raw_text.startswith('<html'):
+                    logger.error("🚫 Server returned HTML (captcha or protection)")
+                    logger.error(f"Preview: {raw_text[:300]}")
                     continue
-
-                # === PHP SERIALIZED DATA CHECK ===
-                if raw_text.startswith(('a:', 'O:', 's:', 'i:', 'd:')) or (raw_text[0].isdigit() and ':' in raw_text[:20]):
-                    logger.error("❌ PHP serialized data received instead of JSON!")
-                    continue
-
-                # === TRY JSON PARSE ===
                 try:
-                    data = json.loads(raw_text)
+                    data = response.json()
                     count = len(data.get("assignments", []))
                     logger.info(f"✅ SUCCESS! Loaded {count} assignments")
                     return data
-                except json.JSONDecodeError as je:
+                except Exception as je:
                     logger.error(f"JSON parse failed: {je}")
-                    logger.error(f"First 500 chars: {raw_text[:500]}")
+                    logger.error(f"First 300 chars: {raw_text[:300]}")
                     continue
-
-            logger.error("❌ All 10 attempts failed - SiteGround protection is blocking")
+            logger.error("❌ All attempts failed - Server not returning valid JSON")
             return None
-
     except Exception as e:
         logger.error(f"❌ Fetch error: {e}")
         return None
@@ -194,51 +140,34 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, edi
     data = context.bot_data.get("assignment_data") or await fetch_data()
     if data and "assignments" in data:
         context.bot_data["assignment_data"] = data
-
     if not data or "assignments" not in data:
-        text = "❌ Could not load assignments right now.\n\n" \
-               "⚠️ SiteGround Anti-Bot is blocking the request.\n\n" \
-               "Try **🔄 Refresh Data** again in a few minutes."
+        text = "❌ Could not load assignments right now.\n\nPlease click **🔄 Refresh Data**"
         if edit and update.callback_query:
             await update.callback_query.edit_message_text(text, parse_mode="Markdown")
         else:
             await update.message.reply_text(text, parse_mode="Markdown")
         return
-
     keyboard, active = create_assignment_buttons(data["assignments"])
     text = f"📚 **Active Assignments** ({active})\n_Deadline passed within last 5 days_\n\nSelect an assignment:"
-
     if edit and update.callback_query:
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
     else:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
-# ================== BUTTON HANDLER (BUG FIXED) ==================
+# ================== BUTTON HANDLER ==================
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     action = query.data
-
-    # === SEND TO CHANNEL (moved to top - fixes original bug) ===
-    if action == "send_to_channel":
-        channel_text = context.bot_data.get("pending_channel_text")
-        if channel_text:
-            await send_to_channel(context, channel_text)
-            await query.edit_message_text("✅ Sent to @lmsmersa successfully!")
-        else:
-            await query.edit_message_text("❌ Nothing to send.")
-        return
-
     if action in ["back_to_list", "refresh"]:
         await show_main_menu(update, context, edit=True)
         return
-
+    data = context.bot_data.get("assignment_data") or await fetch_data()
+    if not data or "assignments" not in data:
+        await query.edit_message_text("❌ No data available. Try Refresh again.")
+        return
+    assignments = data["assignments"]
     if action == "all_assignments":
-        data = context.bot_data.get("assignment_data") or await fetch_data()
-        if not data or "assignments" not in data:
-            await query.edit_message_text("❌ No data available.")
-            return
-        assignments = data["assignments"]
         text = "📋 **All Assignments**\n\n"
         for ass in assignments:
             time_str = format_time_ago(ass.get("minutes_past", 0))
@@ -247,13 +176,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
         return
-
     if action.startswith("ass_"):
-        data = context.bot_data.get("assignment_data") or await fetch_data()
-        if not data or "assignments" not in data:
-            await query.edit_message_text("❌ No data available.")
-            return
-        assignments = data["assignments"]
         try:
             ass_id = int(action[4:])
             selected = next((a for a in assignments if a.get("assignment_id") == ass_id), None)
@@ -274,21 +197,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await query.edit_message_text("Invalid selection.")
             return
-
-    # === DETAIL VIEWS ===
-    data = context.bot_data.get("assignment_data") or await fetch_data()
-    if not data or "assignments" not in data:
-        await query.edit_message_text("❌ No data available.")
-        return
-
+    # Detail views
     ass = context.bot_data.get("selected_assignment")
     if not ass:
         await query.edit_message_text("❌ No assignment selected.")
         return
-
     minutes_past = ass.get("minutes_past", 0)
     title = ass.get("title", "Unknown Assignment")
-
     if action == "summary_this":
         stats = ass.get("statistics", {})
         rate = round(stats.get("submission_rate", 0), 1)
@@ -304,7 +219,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]
         ]
         context.bot_data["pending_channel_text"] = channel_text
-
     elif action == "missing_this":
         submissions = ass.get("submissions", {})
         late_list = submissions.get("late", [])
@@ -334,7 +248,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]
         ]
         context.bot_data["pending_channel_text"] = channel_text
-
     else:  # remaining_this
         if minutes_past < 0:
             time_str = format_remaining_time(abs(minutes_past))
@@ -342,8 +255,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             text = f"⏰ **Deadline Info**\n**{title}**\n\nDeadline passed **{format_time_ago(minutes_past)}**."
         keyboard = [[InlineKeyboardButton("⬅ Back to List", callback_data="back_to_list")]]
-
     await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+    if action == "send_to_channel":
+        channel_text = context.bot_data.get("pending_channel_text")
+        if channel_text:
+            await send_to_channel(context, channel_text)
+            await query.edit_message_text("✅ Sent to @lmsmersa successfully!")
+        return
 
 # ================== START COMMAND ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -361,17 +279,13 @@ async def main_async():
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(button_handler))
-
     async def error_handler(update, context):
         logger.error(f"Error: {context.error}")
-
     application.add_error_handler(error_handler)
     application.post_init = post_init
-
     await application.initialize()
     await application.start()
     logger.info("✅ Bot polling started")
-
     try:
         await application.updater.start_polling(drop_pending_updates=True)
         await asyncio.Event().wait()
@@ -384,7 +298,6 @@ if __name__ == "__main__":
             logger.info(f"[{time.strftime('%H:%M:%S')}] Keep-alive")
             time.sleep(300)
     threading.Thread(target=keep_alive, daemon=True).start()
-
     try:
         asyncio.run(main_async())
     except Exception as e:
